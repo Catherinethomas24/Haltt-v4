@@ -4,6 +4,23 @@ import './index.css';
 import App from './App';
 import reportWebVitals from './reportWebVitals';
 
+// Suppress all console output
+console.log = () => {};
+console.error = () => {};
+console.warn = () => {};
+console.info = () => {};
+console.debug = () => {};
+
+// Suppress unhandled promise rejections
+window.addEventListener('unhandledrejection', (event) => {
+  event.preventDefault();
+});
+
+// Suppress all errors
+window.addEventListener('error', (event) => {
+  event.preventDefault();
+});
+
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(
   <React.StrictMode>

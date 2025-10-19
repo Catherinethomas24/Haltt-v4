@@ -2,6 +2,8 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth, auth, signOut } from '../firebase';
 import { LogOut, User, Mail, Home, Zap, Wallet, Plus, X, Send, Download, TrendingUp, History, AlertTriangle, Cloud, Users, Trash2, FileText, Receipt, Archive, Barcode, Shield, Flag, UserX, UsersRound, Menu, ChevronLeft } from 'lucide-react';
 import { Connection, PublicKey, LAMPORTS_PER_SOL, SystemProgram } from '@solana/web3.js';
+import { syncWalletsToFirestore, removeWalletFromUser, initializeUserDocument } from '../services/walletService';
+import { testFirestoreConnection } from '../utils/testFirestore';
 
 // Import tab components
 import AuditLogs from './tabs/AuditLogs';
@@ -59,7 +61,7 @@ const Dashboard = () => {
       try {
         await signOut(auth);
       } catch (error) {
-        console.error("Sign Out Error:", error);
+        // Sign out error silenced
       }
     };
 
@@ -119,7 +121,6 @@ const Dashboard = () => {
         const data = await response.json();
         setSolPrice(data.solana.usd);
       } catch (error) {
-        console.error('Error fetching SOL price:', error);
         setSolPrice(0);
       }
     };
@@ -133,7 +134,6 @@ const Dashboard = () => {
           const balance = await connection.getBalance(new PublicKey(publicKey));
           return balance / LAMPORTS_PER_SOL;
         } catch (error) {
-          console.error(`[Balance Fetch] RPC ${i} failed:`, error);
           if (i === endpoints.length - 1) return 0;
         }
       }
@@ -163,7 +163,6 @@ const Dashboard = () => {
                     .map(info => info.signature);
                 break; 
             } catch (error) {
-                console.error(`[TX Fetch] RPC ${i} (${endpoint}) failed for signatures:`, error);
                 if (i === rpcEndpoints[network].length - 1) return [];
             }
         }
@@ -234,7 +233,6 @@ const Dashboard = () => {
             });
 
         } catch (error) {
-            console.error('[TX Parse] Error fetching/parsing full transaction data:', error);
             return [];
         }
     };
@@ -302,9 +300,16 @@ const Dashboard = () => {
           };
               if (!connectedWallets.some(w => w.publicKey === newWallet.publicKey)) {
           setConnectedWallets(prev => [...prev, newWallet]);
+          
+          // Sync to Firestore automatically
+          if (user?.email) {
+            try {
+              await syncWalletsToFirestore(user.email, [newWallet]);
+            } catch (error) {
+              // Firestore sync error silenced
+            }
+          }
               }
-          } else {
-              console.error('Solana wallet connected but Public Key is missing.');
           }
 
         } else if (wallet.type === 'ethereum') {
@@ -317,15 +322,33 @@ const Dashboard = () => {
           };
             if (!connectedWallets.some(w => w.address === newWallet.address)) {
           setConnectedWallets(prev => [...prev, newWallet]);
+          
+          // Sync to Firestore automatically
+          if (user?.email) {
+            try {
+              await syncWalletsToFirestore(user.email, [newWallet]);
+            } catch (error) {
+              // Firestore sync error silenced
+            }
+          }
             }
         }
       } catch (error) {
-        console.error('Wallet connection error:', error);
+        // Wallet connection error silenced
       }
     };
 
-    const disconnectWallet = (uniqueKey) => {
+    const disconnectWallet = async (uniqueKey) => {
       setConnectedWallets(prev => prev.filter(w => (w.publicKey || w.address) !== uniqueKey));
+      
+      // Remove from Firestore automatically
+      if (user?.email) {
+        try {
+          await removeWalletFromUser(user.email, uniqueKey);
+        } catch (error) {
+          // Firestore removal error silenced
+        }
+      }
     };
     
     // --- FIXED WALLET DETECTION LOGIC ---
@@ -382,6 +405,19 @@ const Dashboard = () => {
       }
     }, [network, connectedWallets.length]);
 
+    // Initialize user document in Firestore when user signs in
+    useEffect(() => {
+      if (user?.email) {
+        initializeUserDocument(user.email)
+          .then(() => {
+            // User document initialized
+          })
+          .catch(error => {
+            // Initialization error silenced
+          });
+      }
+    }, [user]);
+
     // Reset profile image error when user changes and test image load
     useEffect(() => {
       setProfileImageError(false);
@@ -392,7 +428,6 @@ const Dashboard = () => {
         // Try each proxy URL in sequence
         const tryNextUrl = async (index) => {
           if (index >= proxyUrls.length) {
-            console.log('All profile image URLs failed to load');
             setProfileImageError(true);
             return;
           }
@@ -401,10 +436,8 @@ const Dashboard = () => {
           const canLoad = await testImageLoad(url);
           
           if (canLoad) {
-            console.log('Profile image loaded successfully with URL:', url);
             setProfileImageUrl(url);
           } else {
-            console.log('Profile image URL failed:', url);
             tryNextUrl(index + 1);
           }
         };
@@ -727,11 +760,7 @@ const Dashboard = () => {
                         alt="Profile" 
                         className="w-12 h-12 rounded-full object-cover shadow-lg border border-red-500"
                         onError={(e) => {
-                          console.log('Profile image failed to load:', profileImageUrl);
                           setProfileImageError(true);
-                        }}
-                        onLoad={(e) => {
-                          console.log('Profile image loaded successfully:', profileImageUrl);
                         }}
                       />
                     ) : (

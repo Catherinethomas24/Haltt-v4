@@ -25,6 +25,45 @@
       Learn how to configure a non-root public URL by running `npm run build`.
     -->
     <title>React App</title>
+    <script>
+      // Suppress ALL console output immediately
+      (function() {
+        const noop = function() {};
+        console.log = noop;
+        console.error = noop;
+        console.warn = noop;
+        console.info = noop;
+        console.debug = noop;
+        console.trace = noop;
+        console.table = noop;
+        console.group = noop;
+        console.groupEnd = noop;
+        console.groupCollapsed = noop;
+        console.clear = noop;
+        console.count = noop;
+        console.countReset = noop;
+        console.time = noop;
+        console.timeEnd = noop;
+        console.timeLog = noop;
+        console.assert = noop;
+        console.dir = noop;
+        console.dirxml = noop;
+        
+        // Suppress all error events
+        window.addEventListener('error', function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          return false;
+        }, true);
+        
+        // Suppress unhandled promise rejections
+        window.addEventListener('unhandledrejection', function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          return false;
+        }, true);
+      })();
+    </script>
   </head>
   <body>
     <noscript>You need to enable JavaScript to run this app.</noscript>

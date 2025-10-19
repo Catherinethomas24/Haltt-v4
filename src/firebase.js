@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut } from 'firebase/auth';
-// import { getFirestore } from 'firebase/firestore'; // Temporarily disabled
+import { getFirestore } from 'firebase/firestore';
 
 // --- 1. FIREBASE CONFIGURATION (Using the user's provided config) ---
 const firebaseConfig = {
@@ -28,8 +28,9 @@ googleProvider.addScope('https://www.googleapis.com/auth/userinfo.profile');
 googleProvider.setCustomParameters({
   prompt: 'select_account'
 });
-// Initialize Firestore - temporarily disabled
-// const db = getFirestore(app);
+
+// Initialize Firestore
+const db = getFirestore(app);
 
 // --- 2. AUTH STATE HOOK (Replacement for react-firebase-hooks) ---
 // Custom hook to manage the global auth state, replacing 'useAuthState' for simplicity
@@ -50,6 +51,5 @@ const useAuth = () => {
 };
 
 // Export the auth instance, provider, hook, and auth functions for use in other components
-export { auth, googleProvider, useAuth, signInWithPopup, signOut };
-// export { db }; // Temporarily disabled
+export { auth, googleProvider, useAuth, signInWithPopup, signOut, db };
 
