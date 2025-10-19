@@ -1,9 +1,11 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth, auth, signOut } from '../firebase';
-import { LogOut, User, Mail, Home, Zap, Wallet, Plus, X, Send, Download, TrendingUp, History, AlertTriangle, Cloud, Users, Trash2, FileText, Receipt, Archive, Barcode, Shield, Flag, UserX, UsersRound, Menu, ChevronLeft } from 'lucide-react';
+import { LogOut, User, Mail, Home, Zap, Wallet, Plus, X, Send, Download, TrendingUp, History, AlertTriangle, Cloud, Users, Trash2, FileText, Receipt, Archive, QrCode, Shield, Flag, UserX, UsersRound, Menu, ChevronLeft, Copy, Check } from 'lucide-react';
 import { Connection, PublicKey, LAMPORTS_PER_SOL, SystemProgram } from '@solana/web3.js';
 import { syncWalletsToFirestore, removeWalletFromUser, initializeUserDocument } from '../services/walletService';
+import { logWalletConnection, logWalletDisconnection } from '../services/auditLogService';
 import { testFirestoreConnection } from '../utils/testFirestore';
+import QRCodeStyling from 'qr-code-styling';
 
 // Import tab components
 import AuditLogs from './tabs/AuditLogs';
@@ -29,8 +31,14 @@ const Dashboard = () => {
     const [network, setNetwork] = useState('mainnet-beta');
     const [activeTab, setActiveTab] = useState('balances');
     const [showWalletModal, setShowWalletModal] = useState(false);
+    const [showReceiveModal, setShowReceiveModal] = useState(false);
+    const [selectedReceiveWallet, setSelectedReceiveWallet] = useState(null);
+    const [showQR, setShowQR] = useState(false);
+    const [copiedAddress, setCopiedAddress] = useState(null);
     const [activeView, setActiveView] = useState('dashboard'); // Track which view/tab is active
     const [sidebarOpen, setSidebarOpen] = useState(false); // Mobile sidebar toggle
+    const qrCodeRef = useRef(null);
+    const qrCodeInstance = useRef(null);
     const [connectedWallets, setConnectedWallets] = useState([]);
     const [availableWallets, setAvailableWallets] = useState([]);
     const [totalBalanceUSD, setTotalBalanceUSD] = useState(0);
@@ -59,6 +67,10 @@ const Dashboard = () => {
     // --- AUTH HANDLER ---
     const handleSignOut = async () => {
       try {
+        // Clear localStorage for this user
+        if (user?.email) {
+          localStorage.removeItem(`connectedWallets_${user.email}`);
+        }
         await signOut(auth);
       } catch (error) {
         // Sign out error silenced
@@ -305,6 +317,8 @@ const Dashboard = () => {
           if (user?.email) {
             try {
               await syncWalletsToFirestore(user.email, [newWallet]);
+              // Log wallet connection to audit logs
+              await logWalletConnection(user.email, newWallet);
             } catch (error) {
               // Firestore sync error silenced
             }
@@ -327,6 +341,8 @@ const Dashboard = () => {
           if (user?.email) {
             try {
               await syncWalletsToFirestore(user.email, [newWallet]);
+              // Log wallet connection to audit logs
+              await logWalletConnection(user.email, newWallet);
             } catch (error) {
               // Firestore sync error silenced
             }
@@ -339,12 +355,39 @@ const Dashboard = () => {
     };
 
     const disconnectWallet = async (uniqueKey) => {
-      setConnectedWallets(prev => prev.filter(w => (w.publicKey || w.address) !== uniqueKey));
+      // Find wallet info before removing
+      const walletToRemove = connectedWallets.find(w => (w.publicKey || w.address) === uniqueKey);
       
-      // Remove from Firestore automatically
+      const updatedWallets = connectedWallets.filter(w => (w.publicKey || w.address) !== uniqueKey);
+      setConnectedWallets(updatedWallets);
+      
+      // Update localStorage
       if (user?.email) {
+        if (updatedWallets.length === 0) {
+          localStorage.removeItem(`connectedWallets_${user.email}`);
+        } else {
+          const walletData = updatedWallets.map(wallet => ({
+            name: wallet.name,
+            type: wallet.type,
+            publicKey: wallet.publicKey,
+            address: wallet.address,
+            connected: wallet.connected
+          }));
+          localStorage.setItem(`connectedWallets_${user.email}`, JSON.stringify(walletData));
+        }
+      }
+      
+      // Remove from Firestore and log disconnection
+      if (user?.email && walletToRemove) {
         try {
           await removeWalletFromUser(user.email, uniqueKey);
+          // Log wallet disconnection to audit logs
+          await logWalletDisconnection(
+            user.email,
+            uniqueKey,
+            walletToRemove.name,
+            walletToRemove.type
+          );
         } catch (error) {
           // Firestore removal error silenced
         }
@@ -418,6 +461,37 @@ const Dashboard = () => {
       }
     }, [user]);
 
+    // Save connected wallets to localStorage whenever they change
+    useEffect(() => {
+      if (user?.email && connectedWallets.length > 0) {
+        const walletData = connectedWallets.map(wallet => ({
+          name: wallet.name,
+          type: wallet.type,
+          publicKey: wallet.publicKey,
+          address: wallet.address,
+          connected: wallet.connected
+        }));
+        localStorage.setItem(`connectedWallets_${user.email}`, JSON.stringify(walletData));
+      }
+    }, [connectedWallets, user?.email]);
+
+    // Restore connected wallets from localStorage on mount
+    useEffect(() => {
+      if (user?.email) {
+        const savedWallets = localStorage.getItem(`connectedWallets_${user.email}`);
+        if (savedWallets) {
+          try {
+            const walletData = JSON.parse(savedWallets);
+            if (walletData && walletData.length > 0) {
+              setConnectedWallets(walletData);
+            }
+          } catch (error) {
+            // Failed to parse saved wallets
+          }
+        }
+      }
+    }, [user?.email]);
+
     // Reset profile image error when user changes and test image load
     useEffect(() => {
       setProfileImageError(false);
@@ -470,6 +544,46 @@ const Dashboard = () => {
 
       return () => clearInterval(interval);
     }, [connectedWallets, network, updateWalletBalances, updateRecentTransactions]);
+
+    // Generate QR code when wallet is selected
+    useEffect(() => {
+      if (selectedReceiveWallet && qrCodeRef.current) {
+        const address = selectedReceiveWallet.publicKey || selectedReceiveWallet.address;
+        
+        // Clear previous QR code
+        qrCodeRef.current.innerHTML = '';
+
+        // Create QR code
+        qrCodeInstance.current = new QRCodeStyling({
+          width: 280,
+          height: 280,
+          data: address,
+          margin: 10,
+          qrOptions: {
+            typeNumber: 0,
+            mode: 'Byte',
+            errorCorrectionLevel: 'H'
+          },
+          dotsOptions: {
+            type: 'square',
+            color: '#06b6d4'
+          },
+          backgroundOptions: {
+            color: '#ffffff'
+          },
+          cornersSquareOptions: {
+            type: 'square',
+            color: '#06b6d4'
+          },
+          cornersDotOptions: {
+            type: 'square',
+            color: '#06b6d4'
+          }
+        });
+
+        qrCodeInstance.current.append(qrCodeRef.current);
+      }
+    }, [selectedReceiveWallet]);
   
     if (!user) {
       return null;
@@ -482,12 +596,21 @@ const Dashboard = () => {
       const uniqueKey = wallet.publicKey || wallet.address;
       const balance = walletBalances[uniqueKey] || 0;
       const usdValue = balance * solPrice;
+      
+      // Get wallet icon or use fallback
+      const walletIcon = walletIconPaths[wallet.name];
   
     return (
         <div className="flex items-center justify-between p-4 bg-gray-800/70 backdrop-blur-sm border-b border-gray-700 hover:bg-gray-800 transition duration-300 group">
             <div className="flex items-center space-x-3">
-                <div className="w-10 h-10 rounded-full flex items-center justify-center bg-gray-900 border border-cyan-700/50 p-1.5">
-                    <img src={wallet.iconPath} alt={wallet.name} className="w-full h-full object-contain" />
+                <div className="w-10 h-10 rounded-full flex items-center justify-center bg-gradient-to-br from-cyan-900/50 to-purple-900/50 border border-cyan-700/50 p-1.5">
+                    {walletIcon ? (
+                        <img src={walletIcon} alt={wallet.name} className="w-full h-full object-contain" />
+                    ) : (
+                        <div className="w-full h-full rounded-full bg-gradient-to-br from-cyan-600 to-purple-600 flex items-center justify-center text-white text-sm font-bold">
+                            {wallet.name?.charAt(0) || 'W'}
+                        </div>
+                    )}
                 </div>
                 <div>
                     <p className="font-semibold text-white text-lg">{wallet.name}</p>
@@ -688,8 +811,8 @@ const Dashboard = () => {
                     : 'text-gray-400 hover:bg-cyan-900/20'
                 }`}
               >
-                <Barcode className="w-4 h-4 mr-3" />
-                <span>Export Barcode</span>
+                <QrCode className="w-4 h-4 mr-3" />
+                <span>QR Codes</span>
               </div>
             </div>
 
@@ -811,7 +934,7 @@ const Dashboard = () => {
                 {activeView === 'auditLogs' && <AuditLogs />}
                 {activeView === 'receipts' && <Receipts />}
                 {activeView === 'storeReceipts' && <StoreReceipts />}
-                {activeView === 'exportBarcode' && <ExportBarcode />}
+                {activeView === 'exportBarcode' && <ExportBarcode connectedWallets={connectedWallets} />}
                 {activeView === 'manualFraudReporting' && <ManualFraudReporting />}
                 {activeView === 'manageBlocklist' && <ManageBlocklist />}
                 {activeView === 'manageTrustedContacts' && <ManageTrustedContacts />}
@@ -849,7 +972,10 @@ const Dashboard = () => {
                                 <div className="w-12 h-12 rounded-full bg-cyan-700/20 flex items-center justify-center border border-cyan-700/40 group-hover:bg-cyan-700/30 transition-all"><Send className="w-5 h-5" /></div>
                                 <span className="premium-label text-xs">Send</span>
                             </button>
-                            <button className="flex flex-col items-center space-y-2 text-cyan-400 hover:text-cyan-300 transition-colors group">
+                            <button 
+                                onClick={() => setShowReceiveModal(true)}
+                                className="flex flex-col items-center space-y-2 text-cyan-400 hover:text-cyan-300 transition-colors group"
+                            >
                                 <div className="w-12 h-12 rounded-full bg-cyan-700/20 flex items-center justify-center border border-cyan-700/40 group-hover:bg-cyan-700/30 transition-all"><Download className="w-5 h-5" /></div>
                                 <span className="premium-label text-xs">Receive</span>
                             </button>
@@ -988,8 +1114,222 @@ const Dashboard = () => {
             </div>
           </div>
         )}
+
+        {/* Receive Modal */}
+        {showReceiveModal && (
+          <div className="fixed inset-0 bg-black/90 backdrop-blur-md flex items-center justify-center z-50 p-4">
+            <div className="bg-gray-900/95 rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto border border-cyan-900/50 backdrop-blur-xl">
+              <div className="p-6 md:p-8">
+                {/* Header */}
+                <div className="flex items-center justify-between mb-6 border-b border-gray-800 pb-4">
+                  <div>
+                    <h3 className="text-2xl font-bold text-white">Receive Crypto</h3>
+                    <p className="text-sm text-gray-400 mt-1">Select a wallet to receive funds</p>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setShowReceiveModal(false);
+                      setSelectedReceiveWallet(null);
+                      setShowQR(false);
+                      setCopiedAddress(null);
+                    }}
+                    className="text-gray-400 hover:text-cyan-400 transition-colors p-2 rounded-full hover:bg-gray-800"
+                  >
+                    <X className="w-6 h-6" />
+                  </button>
+                </div>
+
+                {/* Wallet List */}
+                {!selectedReceiveWallet ? (
+                  <div className="space-y-3">
+                    {connectedWallets.map((wallet, index) => {
+                      const uniqueKey = wallet.publicKey || wallet.address;
+                      const walletIcon = walletIconPaths[wallet.name];
+                      
+                      return (
+                        <div
+                          key={index}
+                          className="flex items-center justify-between p-4 bg-gray-800/50 hover:bg-gray-800 rounded-xl border border-gray-700 transition-all group"
+                        >
+                          <div className="flex items-center space-x-4 flex-1">
+                            {/* Wallet Icon */}
+                            <div className="w-12 h-12 rounded-full flex items-center justify-center bg-gradient-to-br from-cyan-900/50 to-purple-900/50 border border-cyan-700/50 p-2">
+                              {walletIcon ? (
+                                <img src={walletIcon} alt={wallet.name} className="w-full h-full object-contain" />
+                              ) : (
+                                <div className="w-full h-full rounded-full bg-gradient-to-br from-cyan-600 to-purple-600 flex items-center justify-center text-white text-sm font-bold">
+                                  {wallet.name?.charAt(0) || 'W'}
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Wallet Info */}
+                            <div className="flex-1 min-w-0">
+                              <p className="font-semibold text-white text-lg">{wallet.name}</p>
+                              <p className="text-sm text-gray-400 font-mono truncate">
+                                {uniqueKey?.slice(0, 8)}...{uniqueKey?.slice(-8)}
+                              </p>
+                            </div>
+                          </div>
+
+                          {/* Action Buttons */}
+                          <div className="flex items-center space-x-2">
+                            {/* Copy Button */}
+                            <button
+                              onClick={async () => {
+                                try {
+                                  await navigator.clipboard.writeText(uniqueKey);
+                                  setCopiedAddress(uniqueKey);
+                                  setTimeout(() => setCopiedAddress(null), 2000);
+                                } catch (err) {
+                                  // Copy failed
+                                }
+                              }}
+                              className="p-2.5 bg-cyan-600/20 hover:bg-cyan-600/30 text-cyan-400 rounded-lg transition-all border border-cyan-600/30"
+                              title="Copy Address"
+                            >
+                              {copiedAddress === uniqueKey ? (
+                                <Check className="w-5 h-5" />
+                              ) : (
+                                <Copy className="w-5 h-5" />
+                              )}
+                            </button>
+
+                            {/* QR Button */}
+                            <button
+                              onClick={() => {
+                                setSelectedReceiveWallet(wallet);
+                                setShowQR(true);
+                              }}
+                              className="p-2.5 bg-purple-600/20 hover:bg-purple-600/30 text-purple-400 rounded-lg transition-all border border-purple-600/30"
+                              title="Show QR Code"
+                            >
+                              <QrCode className="w-5 h-5" />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+
+                    {connectedWallets.length === 0 && (
+                      <div className="text-center py-12">
+                        <Wallet className="w-16 h-16 text-gray-600 mx-auto mb-4" />
+                        <p className="text-gray-400 text-lg font-medium">No Wallets Connected</p>
+                        <p className="text-gray-500 text-sm mt-2">Connect a wallet first to receive funds</p>
+                        <button
+                          onClick={() => {
+                            setShowReceiveModal(false);
+                            setShowWalletModal(true);
+                          }}
+                          className="mt-4 bg-cyan-600 hover:bg-cyan-500 text-white px-6 py-2 rounded-lg transition-all"
+                        >
+                          Connect Wallet
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  /* QR Code View */
+                  <div className="space-y-6">
+                    {/* Back Button */}
+                    <button
+                      onClick={() => {
+                        setSelectedReceiveWallet(null);
+                        setShowQR(false);
+                      }}
+                      className="flex items-center text-cyan-400 hover:text-cyan-300 transition-colors"
+                    >
+                      <ChevronLeft className="w-5 h-5 mr-1" />
+                      Back to wallets
+                    </button>
+
+                    {/* Wallet Info */}
+                    <div className="bg-gray-800/50 rounded-xl p-6 border border-gray-700">
+                      <div className="flex items-center space-x-4 mb-6">
+                        <div className="w-16 h-16 rounded-full flex items-center justify-center bg-gradient-to-br from-cyan-900/50 to-purple-900/50 border border-cyan-700/50 p-3">
+                          {walletIconPaths[selectedReceiveWallet.name] ? (
+                            <img 
+                              src={walletIconPaths[selectedReceiveWallet.name]} 
+                              alt={selectedReceiveWallet.name} 
+                              className="w-full h-full object-contain" 
+                            />
+                          ) : (
+                            <div className="w-full h-full rounded-full bg-gradient-to-br from-cyan-600 to-purple-600 flex items-center justify-center text-white text-xl font-bold">
+                              {selectedReceiveWallet.name?.charAt(0) || 'W'}
+                            </div>
+                          )}
+                        </div>
+                        <div>
+                          <p className="text-2xl font-bold text-white">{selectedReceiveWallet.name}</p>
+                          <p className="text-sm text-gray-400">{selectedReceiveWallet.type === 'ethereum' ? 'Ethereum' : 'Solana'}</p>
+                        </div>
+                      </div>
+
+                      {/* QR Code */}
+                      <div className="flex justify-center mb-6">
+                        <div className="text-center">
+                          <div 
+                            ref={qrCodeRef}
+                            className="inline-block"
+                          />
+                          <p className="text-gray-400 text-sm mt-4">
+                            Scan to send {selectedReceiveWallet.type === 'ethereum' ? 'ETH' : 'SOL'}
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* Address */}
+                      <div>
+                        <label className="text-gray-400 text-sm font-medium mb-2 block">Wallet Address</label>
+                        <div className="flex items-center space-x-2">
+                          <div className="flex-1 bg-gray-900/70 rounded-lg px-4 py-3 border border-gray-700">
+                            <p className="text-white font-mono text-sm break-all">
+                              {selectedReceiveWallet.publicKey || selectedReceiveWallet.address}
+                            </p>
+                          </div>
+                          <button
+                            onClick={async () => {
+                              const address = selectedReceiveWallet.publicKey || selectedReceiveWallet.address;
+                              try {
+                                await navigator.clipboard.writeText(address);
+                                setCopiedAddress(address);
+                                setTimeout(() => setCopiedAddress(null), 2000);
+                              } catch (err) {
+                                // Copy failed
+                              }
+                            }}
+                            className="p-3 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg transition-all"
+                          >
+                            {copiedAddress === (selectedReceiveWallet.publicKey || selectedReceiveWallet.address) ? (
+                              <Check className="w-5 h-5" />
+                            ) : (
+                              <Copy className="w-5 h-5" />
+                            )}
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Warning */}
+                      <div className="mt-6 bg-yellow-900/20 border border-yellow-700/30 rounded-lg p-4">
+                        <div className="flex items-start space-x-3">
+                          <AlertTriangle className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
+                          <div>
+                            <p className="text-yellow-400 text-sm font-semibold">Important</p>
+                            <p className="text-yellow-300/80 text-xs mt-1">
+                              Only send {selectedReceiveWallet.type === 'ethereum' ? 'Ethereum (ETH) and ERC-20 tokens' : 'Solana (SOL) and SPL tokens'} to this address. Sending other assets may result in permanent loss.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
-  };
+};
 
 export default Dashboard;
