@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth, auth, signOut } from '../firebase';
-import { LogOut, User, Mail, Home, Zap, Wallet, Plus, X, Send, Download, TrendingUp, History, AlertTriangle, Cloud, Users, Trash2, FileText, Receipt, Archive, QrCode, Shield, Flag, UserX, UsersRound, Menu, ChevronLeft, Copy, Check } from 'lucide-react';
+import { LogOut, User, Mail, Home, Zap, Wallet, Plus, X, Send, Download, TrendingUp, History, AlertTriangle, Cloud, Users, Trash2, FileText, Receipt, Archive, QrCode, Shield, Flag, UserX, UsersRound, Menu, ChevronLeft, Copy, Check, ExternalLink, Clock, CheckCircle, XCircle } from 'lucide-react';
 import { Connection, PublicKey, LAMPORTS_PER_SOL, SystemProgram } from '@solana/web3.js';
 import { syncWalletsToFirestore, removeWalletFromUser, initializeUserDocument } from '../services/walletService';
 import { logWalletConnection, logWalletDisconnection } from '../services/auditLogService';
@@ -48,19 +48,15 @@ const Dashboard = () => {
     const [loading, setLoading] = useState(false);
     const [profileImageError, setProfileImageError] = useState(false);
     const [profileImageUrl, setProfileImageUrl] = useState(null);
+    const [copiedSignature, setCopiedSignature] = useState(null);
     
     // --- RPC ENDPOINTS (Public/Generic only) ---
     const rpcEndpoints = {
         'mainnet-beta': [
-            'https://api.mainnet-beta.solana.com',
-            'https://solana-mainnet.g.alchemy.com/v2/demo', 
-            'https://rpc.ankr.com/solana',
-            'https://solana-api.projectserum.com'
+            'https://api.mainnet-beta.solana.com'
         ],
         'devnet': [
-            'https://api.devnet.solana.com',
-            'https://solana-devnet.g.alchemy.com/v2/demo', 
-            'https://api.testnet.solana.com'
+            'https://api.devnet.solana.com'
         ]
     };
     
@@ -158,28 +154,37 @@ const Dashboard = () => {
             return [];
         }
 
-        let signatures = [];
+        let signatureInfos = [];
         let connection = null;
 
         for (let i = 0; i < rpcEndpoints[network].length; i++) {
             const endpoint = rpcEndpoints[network][i];
             try {
+                console.log(`Trying RPC endpoint ${i + 1}/${rpcEndpoints[network].length}: ${endpoint}`);
                 connection = new Connection(endpoint, 'finalized'); 
-                const signatureInfos = await connection.getSignaturesForAddress(
+                signatureInfos = await connection.getSignaturesForAddress(
                     new PublicKey(publicKey),
-                    { limit: 200, commitment: 'finalized' }
+                    { limit: 20, commitment: 'finalized' }
                 );
                 
-                signatures = signatureInfos
-                    .filter(info => !info.err && info.signature)
-                    .map(info => info.signature);
-                break; 
+                // Keep all transactions, including failed ones
+                if (signatureInfos && signatureInfos.length > 0) {
+                    console.log(`✅ Successfully fetched ${signatureInfos.length} transactions from ${endpoint}`);
+                    break;
+                }
             } catch (error) {
-                if (i === rpcEndpoints[network].length - 1) return [];
+                console.error(`❌ RPC endpoint ${endpoint} failed:`, error.message);
+                if (i === rpcEndpoints[network].length - 1) {
+                    console.error('All RPC endpoints failed. Consider getting a free API key from Helius or QuickNode.');
+                    return [];
+                }
             }
         }
 
-        if (signatures.length === 0 || !connection) return [];
+        if (signatureInfos.length === 0 || !connection) return [];
+        
+        // Map signature info to get basic data
+        const signatures = signatureInfos.map(info => info.signature);
         
         try {
             const transactions = await connection.getParsedTransactions(
@@ -188,12 +193,18 @@ const Dashboard = () => {
             );
 
             return transactions.map((tx, index) => {
-                const txSignature = signatures[index];
+                const sigInfo = signatureInfos[index];
+                const txSignature = sigInfo.signature;
 
                 if (!tx || !tx.meta) {
                     return {
-                        signature: txSignature, blockTime: null, amount: 0,
-                        direction: 'Unknown', success: false, publicKey: publicKey,
+                        signature: txSignature, 
+                        slot: sigInfo.slot,
+                        blockTime: sigInfo.blockTime, 
+                        amount: 0,
+                        direction: 'Unknown', 
+                        success: !sigInfo.err, 
+                        publicKey: publicKey,
                         type: 'RPC Data Gap'
                     };
                 }
@@ -540,7 +551,7 @@ const Dashboard = () => {
           updateRecentTransactions();
         }
         fetchSolPrice(); 
-      }, 30000); 
+      }, 60000); // Refresh every 60 seconds to avoid rate limits 
 
       return () => clearInterval(interval);
     }, [connectedWallets, network, updateWalletBalances, updateRecentTransactions]);
@@ -630,7 +641,7 @@ const Dashboard = () => {
                 </div>
                 <button
                     onClick={() => disconnectWallet(uniqueKey)}
-                    className="p-2 text-red-400 hover:text-red-300 hover:bg-red-900/20 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                    className="p-2 text-red-400 hover:text-red-300 hover:bg-red-900/20 rounded-lg transition-all opacity-0 group-hover:opacity-100 cursor-pointer"
                     title="Remove Wallet"
                 >
                     <Trash2 className="w-5 h-5" />
@@ -640,37 +651,107 @@ const Dashboard = () => {
       );
     };
 
-    // Transaction Row Component
+    // Copy signature to clipboard
+    const copySignature = async (signature) => {
+        try {
+            await navigator.clipboard.writeText(signature);
+            setCopiedSignature(signature);
+            setTimeout(() => setCopiedSignature(null), 2000);
+        } catch (err) {
+            console.error('Failed to copy signature:', err);
+        }
+    };
+
+    // Format timestamp for transactions
+    const formatTimestamp = (blockTime) => {
+        if (!blockTime) return 'N/A';
+        const date = new Date(blockTime * 1000);
+        return date.toLocaleString('en-US', {
+            month: 'short',
+            day: 'numeric',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit'
+        });
+    };
+
+    // Transaction Row Component - Enhanced
     const TransactionRow = ({ tx }) => (
-        <div className="flex items-center justify-between p-3 hover:bg-gray-800 transition-colors border-b border-gray-800 last:border-b-0">
-            <div className="flex items-center space-x-3">
-                <div className={`w-3 h-3 rounded-full flex-shrink-0 ${
-                    !tx.success ? 'bg-gray-500' :
-                    tx.direction === 'sent' ? 'bg-red-500' : 
-                    tx.direction === 'received' ? 'bg-green-500' : 'bg-cyan-500'
-                }`}></div>
-                <div>
-                    <p className="font-medium text-white text-sm">
-                        {tx.type}
-                    </p>
-                    <p className="text-xs text-gray-500 font-mono">
-                        {tx.signature.slice(0, 6)}...{tx.signature.slice(-4)}
-                    </p>
+        <div className="p-4 hover:bg-gray-800/50 transition-colors border-b border-gray-800 last:border-b-0">
+            <div className="flex flex-col space-y-3">
+                {/* Top Row: Status Badge and Timestamp */}
+                <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-2">
+                        {tx.success ? (
+                            <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-green-900/30 text-green-400 border border-green-700/50">
+                                <CheckCircle className="w-3 h-3 mr-1" />
+                                Success
+                            </span>
+                        ) : (
+                            <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-red-900/30 text-red-400 border border-red-700/50">
+                                <XCircle className="w-3 h-3 mr-1" />
+                                Failed
+                            </span>
+                        )}
+                        <span className="text-gray-400 text-sm">{tx.type}</span>
+                    </div>
+                    <div className="flex items-center space-x-2 text-gray-500 text-sm">
+                        <Clock className="w-4 h-4" />
+                        <span>{formatTimestamp(tx.blockTime)}</span>
+                    </div>
                 </div>
-            </div>
-            <div className="text-right">
-                <p className={`font-bold text-sm font-mono ${
-                    !tx.success ? 'text-gray-500' :
-                    tx.direction === 'sent' ? 'text-red-400' : 
-                    tx.direction === 'received' ? 'text-green-400' : 'text-cyan-400'
-                }`}>
-                    {tx.success && tx.amount > 0 
-                        ? `${tx.direction === 'sent' ? '-' : '+'}${tx.amount.toFixed(4)} SOL` 
-                        : (tx.success ? 'No SOL Change' : 'Failed')}
-                </p>
-                <p className="text-xs text-gray-600">
-                    {tx.blockTime ? new Date(tx.blockTime * 1000).toLocaleTimeString() : 'N/A'}
-                </p>
+
+                {/* Middle Row: Signature with Copy */}
+                <div className="flex items-center space-x-2">
+                    <div className="flex-1 bg-gray-800/70 rounded-lg px-3 py-2 border border-gray-700">
+                        <div className="flex items-center justify-between">
+                            <p className="text-white font-mono text-sm truncate mr-2">
+                                {tx.signature}
+                            </p>
+                            <button
+                                onClick={() => copySignature(tx.signature)}
+                                className="flex-shrink-0 p-1.5 hover:bg-gray-700 rounded transition-colors cursor-pointer"
+                                title="Copy signature"
+                            >
+                                {copiedSignature === tx.signature ? (
+                                    <Check className="w-4 h-4 text-green-400" />
+                                ) : (
+                                    <Copy className="w-4 h-4 text-gray-400" />
+                                )}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                {/* Bottom Row: Amount, Slot, and Explorer Link */}
+                <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-4">
+                        <div>
+                            <p className={`font-bold text-sm font-mono ${
+                                !tx.success ? 'text-gray-500' :
+                                tx.direction === 'sent' ? 'text-red-400' : 
+                                tx.direction === 'received' ? 'text-green-400' : 'text-cyan-400'
+                            }`}>
+                                {tx.success && tx.amount > 0 
+                                    ? `${tx.direction === 'sent' ? '-' : '+'}${tx.amount.toFixed(4)} SOL` 
+                                    : (tx.success ? 'No SOL Change' : 'Failed')}
+                            </p>
+                        </div>
+                        <div className="text-sm text-gray-400">
+                            Slot: <span className="text-gray-300 font-mono">{tx.slot?.toLocaleString()}</span>
+                        </div>
+                    </div>
+                    <a
+                        href={`https://explorer.solana.com/tx/${tx.signature}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center space-x-1 text-cyan-400 hover:text-cyan-300 transition-colors text-sm font-medium"
+                    >
+                        <span>View on Explorer</span>
+                        <ExternalLink className="w-4 h-4" />
+                    </a>
+                </div>
             </div>
         </div>
     );
@@ -682,7 +763,7 @@ const Dashboard = () => {
         {/* Mobile Menu Button */}
         <button
           onClick={() => setSidebarOpen(!sidebarOpen)}
-          className="lg:hidden fixed top-4 left-4 z-50 p-2 bg-cyan-600 text-white rounded-lg shadow-lg hover:bg-cyan-500 transition-all"
+          className="lg:hidden fixed top-4 left-4 z-50 p-2 bg-cyan-600 text-white rounded-lg shadow-lg hover:bg-cyan-500 transition-all cursor-pointer"
         >
           {sidebarOpen ? <ChevronLeft className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
         </button>
@@ -722,7 +803,7 @@ const Dashboard = () => {
               {/* Close button for mobile */}
               <button
                 onClick={() => setSidebarOpen(false)}
-                className="lg:hidden p-2 hover:bg-gray-800 rounded-lg transition-colors"
+                className="lg:hidden p-2 hover:bg-gray-800 rounded-lg transition-colors cursor-pointer"
               >
                 <X className="w-5 h-5 text-gray-400" />
               </button>
@@ -904,7 +985,7 @@ const Dashboard = () => {
                 </div>
                 <button 
                   onClick={handleSignOut}
-                  className="w-full flex items-center justify-center px-3 py-2 text-xs text-red-400 border border-red-500 rounded-lg hover:bg-red-500/10 hover:border-red-400 transition-all duration-300"
+                  className="w-full flex items-center justify-center px-3 py-2 text-xs text-red-400 border border-red-500 rounded-lg hover:bg-red-500/10 hover:border-red-400 transition-all duration-300 cursor-pointer"
                 >
                   <LogOut className="w-4 h-4 mr-2" />
                   Sign Out
@@ -948,7 +1029,7 @@ const Dashboard = () => {
                         <p className="text-gray-400 mb-8 max-w-sm">Connect your Phantom, Solflare, or Backpack wallets to begin monitoring your Solana assets.</p>
                 <button
                   onClick={() => setShowWalletModal(true)}
-                            className="bg-cyan-600 text-white px-8 py-3 rounded-lg font-semibold shadow-cyan hover:bg-cyan-500 transition-all"
+                            className="bg-cyan-600 text-white px-8 py-3 rounded-lg font-semibold shadow-cyan hover:bg-cyan-500 transition-all cursor-pointer"
                 >
                             <Plus className="w-5 h-5 mr-2 inline-block" /> Connect Wallet
                 </button>
@@ -968,24 +1049,24 @@ const Dashboard = () => {
 
                         {/* Quick Actions (Matching Screenshot) */}
                         <div className="grid grid-cols-2 sm:flex sm:space-x-4 md:space-x-6 gap-4 sm:gap-0 pt-4 border-t border-gray-800">
-                            <button className="flex flex-col items-center space-y-2 text-cyan-400 hover:text-cyan-300 transition-colors group">
+                            <button className="flex flex-col items-center space-y-2 text-cyan-400 hover:text-cyan-300 transition-colors group cursor-pointer">
                                 <div className="w-12 h-12 rounded-full bg-cyan-700/20 flex items-center justify-center border border-cyan-700/40 group-hover:bg-cyan-700/30 transition-all"><Send className="w-5 h-5" /></div>
                                 <span className="premium-label text-xs">Send</span>
                             </button>
                             <button 
                                 onClick={() => setShowReceiveModal(true)}
-                                className="flex flex-col items-center space-y-2 text-cyan-400 hover:text-cyan-300 transition-colors group"
+                                className="flex flex-col items-center space-y-2 text-cyan-400 hover:text-cyan-300 transition-colors group cursor-pointer"
                             >
                                 <div className="w-12 h-12 rounded-full bg-cyan-700/20 flex items-center justify-center border border-cyan-700/40 group-hover:bg-cyan-700/30 transition-all"><Download className="w-5 h-5" /></div>
                                 <span className="premium-label text-xs">Receive</span>
                             </button>
-                            <button className="flex flex-col items-center space-y-2 text-cyan-400 hover:text-cyan-300 transition-colors group">
+                            <button className="flex flex-col items-center space-y-2 text-cyan-400 hover:text-cyan-300 transition-colors group cursor-pointer">
                                 <div className="w-12 h-12 rounded-full bg-cyan-700/20 flex items-center justify-center border border-cyan-700/40 group-hover:bg-cyan-700/30 transition-all"><Users className="w-5 h-5" /></div>
                                 <span className="premium-label text-xs">Contacts</span>
                             </button>
                             <button
                                 onClick={() => setShowWalletModal(true)}
-                                className="flex flex-col items-center space-y-2 text-red-400 hover:text-red-300 transition-colors group"
+                                className="flex flex-col items-center space-y-2 text-red-400 hover:text-red-300 transition-colors group cursor-pointer"
                             >
                                 <div className="w-12 h-12 rounded-full bg-red-700/20 flex items-center justify-center border border-red-700/40 group-hover:bg-red-700/30 transition-all"><Plus className="w-5 h-5" /></div>
                                 <span className="premium-label text-xs">Add Wallet</span>
@@ -996,7 +1077,7 @@ const Dashboard = () => {
                     {/* Tab Navigation */}
                     <div className="flex border-b border-gray-700">
                         <button 
-                            className={`px-6 py-3 font-semibold text-lg transition-colors ${
+                            className={`px-6 py-3 font-semibold text-lg transition-colors cursor-pointer ${
                                 activeTab === 'balances' 
                                 ? 'text-white border-b-2 border-cyan-400' 
                                 : 'text-gray-500 hover:text-gray-300'
@@ -1006,7 +1087,7 @@ const Dashboard = () => {
                             Per Wallet Balances
                         </button>
                       <button
-                            className={`px-6 py-3 font-semibold text-lg transition-colors ${
+                            className={`px-6 py-3 font-semibold text-lg transition-colors cursor-pointer ${
                                 activeTab === 'transactions' 
                                 ? 'text-white border-b-2 border-cyan-400' 
                                 : 'text-gray-500 hover:text-gray-300'
@@ -1062,14 +1143,14 @@ const Dashboard = () => {
 
         {/* Wallet Connection Modal */}
         {showWalletModal && (
-          <div className="fixed inset-0 bg-black/90 backdrop-blur-md flex items-center justify-center z-50 p-4">
-            <div className="bg-gray-900/90 rounded-2xl shadow-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto border border-cyan-900/50 backdrop-blur-xl">
+          <div className="fixed inset-0 bg-black/70 backdrop-blur-lg flex items-center justify-center z-50 p-4 animate-fadeIn">
+            <div className="bg-gray-900/90 rounded-2xl shadow-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto border border-cyan-900/50 backdrop-blur-xl animate-slideUp">
               <div className="p-6 md:p-8">
                 <div className="flex items-center justify-between mb-8 border-b border-gray-800 pb-4">
                   <h3 className="text-2xl font-bold text-white">Connect Wallet</h3>
                   <button
                     onClick={() => setShowWalletModal(false)}
-                    className="text-gray-400 hover:text-cyan-400 transition-colors p-2 rounded-full hover:bg-gray-800"
+                    className="text-gray-400 hover:text-cyan-400 transition-colors p-2 rounded-full hover:bg-gray-800 cursor-pointer"
                   >
                     <X className="w-6 h-6" />
                   </button>
@@ -1091,7 +1172,7 @@ const Dashboard = () => {
                         <button
                           key={index}
                         onClick={() => { connectWallet(wallet); setShowWalletModal(false); }}
-                        className="w-full flex items-center p-4 bg-gray-800/70 rounded-xl hover:bg-gray-800 transition-all border border-cyan-900/50"
+                        className="w-full flex items-center p-4 bg-gray-800/70 rounded-xl hover:bg-gray-800 transition-all border border-cyan-900/50 cursor-pointer"
                       >
                         <div className="w-12 h-12 bg-gray-900 rounded-full flex items-center justify-center mr-4 p-2">
                           <img src={wallet.iconPath} alt={wallet.name} className="w-full h-full object-contain" />
@@ -1117,8 +1198,8 @@ const Dashboard = () => {
 
         {/* Receive Modal */}
         {showReceiveModal && (
-          <div className="fixed inset-0 bg-black/90 backdrop-blur-md flex items-center justify-center z-50 p-4">
-            <div className="bg-gray-900/95 rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto border border-cyan-900/50 backdrop-blur-xl">
+          <div className="fixed inset-0 bg-black/70 backdrop-blur-lg flex items-center justify-center z-50 p-4 animate-fadeIn">
+            <div className="bg-gray-900/95 rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto border border-cyan-900/50 backdrop-blur-xl animate-slideUp">
               <div className="p-6 md:p-8">
                 {/* Header */}
                 <div className="flex items-center justify-between mb-6 border-b border-gray-800 pb-4">
@@ -1185,7 +1266,7 @@ const Dashboard = () => {
                                   // Copy failed
                                 }
                               }}
-                              className="p-2.5 bg-cyan-600/20 hover:bg-cyan-600/30 text-cyan-400 rounded-lg transition-all border border-cyan-600/30"
+                              className="p-2.5 bg-cyan-600/20 hover:bg-cyan-600/30 text-cyan-400 rounded-lg transition-all border border-cyan-600/30 cursor-pointer"
                               title="Copy Address"
                             >
                               {copiedAddress === uniqueKey ? (
@@ -1201,7 +1282,7 @@ const Dashboard = () => {
                                 setSelectedReceiveWallet(wallet);
                                 setShowQR(true);
                               }}
-                              className="p-2.5 bg-purple-600/20 hover:bg-purple-600/30 text-purple-400 rounded-lg transition-all border border-purple-600/30"
+                              className="p-2.5 bg-purple-600/20 hover:bg-purple-600/30 text-purple-400 rounded-lg transition-all border border-purple-600/30 cursor-pointer"
                               title="Show QR Code"
                             >
                               <QrCode className="w-5 h-5" />
@@ -1221,7 +1302,7 @@ const Dashboard = () => {
                             setShowReceiveModal(false);
                             setShowWalletModal(true);
                           }}
-                          className="mt-4 bg-cyan-600 hover:bg-cyan-500 text-white px-6 py-2 rounded-lg transition-all"
+                          className="mt-4 bg-cyan-600 hover:bg-cyan-500 text-white px-6 py-2 rounded-lg transition-all cursor-pointer"
                         >
                           Connect Wallet
                         </button>
