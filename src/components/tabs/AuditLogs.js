@@ -188,7 +188,7 @@ const AuditLogs = () => {
               >
                 <div className="flex items-start gap-4">
                   {/* Wallet Logo */}
-                  <div className={`flex-shrink-0 w-10 h-10 sm:w-12 sm:h-12 rounded-full flex items-center justify-center p-1.5 ${
+                  <div className={`flex-shrink-0 w-10 h-10 sm:w-12 sm:h-12 rounded-lg flex items-center justify-center p-1.5 ${
                     log.action === 'connected'
                       ? 'bg-green-500/20 border-2 border-green-500/50'
                       : 'bg-red-500/20 border-2 border-red-500/50'
@@ -200,7 +200,7 @@ const AuditLogs = () => {
                         className="w-full h-full object-contain"
                       />
                     ) : (
-                      <div className="w-full h-full rounded-full bg-gray-700 flex items-center justify-center text-white text-xs font-bold">
+                      <div className="w-full h-full rounded-md bg-gray-700 flex items-center justify-center text-white text-xs font-bold">
                         {log.walletName?.charAt(0) || 'W'}
                       </div>
                     )}

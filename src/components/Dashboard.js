@@ -53,6 +53,9 @@ const Dashboard = () => {
     // --- RPC ENDPOINTS (Public/Generic only) ---
     const rpcEndpoints = {
         'mainnet-beta': [
+            'https://solitary-distinguished-uranium.solana-mainnet.quiknode.pro/QN_b089837dc0d445729831b789cc04a22c/',
+            'https://rpc.helius.xyz/?api-key=277fd0d2-3b36-46a0-8ecc-24d7cac3a071',
+            'https://solana-api.projectserum.com',
             'https://api.mainnet-beta.solana.com'
         ],
         'devnet': [
@@ -125,24 +128,82 @@ const Dashboard = () => {
             return;
         }
       try {
+        console.log('Fetching SOL price from CoinGecko...');
         const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
         const data = await response.json();
-        setSolPrice(data.solana.usd);
+        console.log('CoinGecko response:', data);
+        
+        if (data?.solana?.usd) {
+          setSolPrice(data.solana.usd);
+          console.log('SOL Price set to:', data.solana.usd);
+        } else {
+          throw new Error('Invalid response from CoinGecko');
+        }
       } catch (error) {
-        setSolPrice(0);
+        console.error('CoinGecko API failed:', error);
+        
+        // Fallback to Binance API
+        try {
+          console.log('Trying fallback: Binance API...');
+          const binanceResponse = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT');
+          const binanceData = await binanceResponse.json();
+          console.log('Binance response:', binanceData);
+          
+          if (binanceData?.price) {
+            const price = parseFloat(binanceData.price);
+            setSolPrice(price);
+            console.log('SOL Price set from Binance:', price);
+          } else {
+            throw new Error('Invalid response from Binance');
+          }
+        } catch (binanceError) {
+          console.error('Binance API also failed:', binanceError);
+          console.warn('Setting SOL price to 0 - all APIs failed');
+          setSolPrice(0);
+        }
       }
     };
 
     // --- FETCH BALANCE ---
     const fetchWalletBalance = async (publicKey) => {
+      console.log(`Fetching balance for: ${publicKey.slice(0, 8)}...`);
+      
+      // FORCE USE PHANTOM'S CONNECTION - Create our own connection using Phantom's RPC
+      if (window.solana && network === 'mainnet-beta') {
+        try {
+          console.log('Creating connection using Phantom provider...');
+          // Create a connection using Phantom's internal RPC
+          const connection = new Connection('https://api.mainnet-beta.solana.com', {
+            commitment: 'confirmed',
+            fetch: window.solana._rpcRequest ? window.solana._rpcRequest.bind(window.solana) : undefined
+          });
+          
+          const balance = await connection.getBalance(new PublicKey(publicKey));
+          const solBalance = balance / LAMPORTS_PER_SOL;
+          console.log(`✅ Balance fetched via Phantom provider: ${solBalance} SOL (${balance} lamports)`);
+          return solBalance;
+        } catch (error) {
+          console.log('Phantom provider method failed:', error.message);
+        }
+      }
+      
       const endpoints = rpcEndpoints[network];
+      console.log(`Using network: ${network}, endpoints:`, endpoints);
+      
       for (let i = 0; i < endpoints.length; i++) {
         try {
+          console.log(`Trying endpoint ${i + 1}/${endpoints.length}: ${endpoints[i]}`);
           const connection = new Connection(endpoints[i], 'confirmed'); 
           const balance = await connection.getBalance(new PublicKey(publicKey));
-          return balance / LAMPORTS_PER_SOL;
+          const solBalance = balance / LAMPORTS_PER_SOL;
+          console.log(`✅ Balance fetched: ${solBalance} SOL (${balance} lamports)`);
+          return solBalance;
         } catch (error) {
-          if (i === endpoints.length - 1) return 0;
+          console.error(`❌ Endpoint ${i + 1} failed:`, error.message);
+          if (i === endpoints.length - 1) {
+            console.error('All endpoints failed, returning 0');
+            return 0;
+          }
         }
       }
       return 0;
@@ -150,33 +211,72 @@ const Dashboard = () => {
 
     // --- TRANSACTION FETCH AND PARSING ---
     const fetchRecentTransactions = async (publicKey) => {
+        console.log(`🔍 Fetching transactions for: ${publicKey.slice(0, 8)}...`);
+        
         if (connectedWallets.find(w => w.publicKey === publicKey)?.type !== 'solana') {
+            console.log('Wallet is not Solana type, skipping');
             return [];
         }
 
         let signatureInfos = [];
         let connection = null;
 
-        for (let i = 0; i < rpcEndpoints[network].length; i++) {
-            const endpoint = rpcEndpoints[network][i];
+        // Try using Phantom's connection first (same as balance fetching)
+        if (window.solana && network === 'mainnet-beta') {
             try {
-                console.log(`Trying RPC endpoint ${i + 1}/${rpcEndpoints[network].length}: ${endpoint}`);
-                connection = new Connection(endpoint, 'finalized'); 
+                console.log('🔮 Trying Phantom provider for transactions...');
+                connection = new Connection('https://api.mainnet-beta.solana.com', {
+                    commitment: 'finalized',
+                    fetch: window.solana._rpcRequest ? window.solana._rpcRequest.bind(window.solana) : undefined
+                });
+                
                 signatureInfos = await connection.getSignaturesForAddress(
                     new PublicKey(publicKey),
                     { limit: 20, commitment: 'finalized' }
                 );
                 
-                // Keep all transactions, including failed ones
+                console.log(`✅ Found ${signatureInfos.length} transactions via Phantom provider`);
+                
                 if (signatureInfos && signatureInfos.length > 0) {
-                    console.log(`✅ Successfully fetched ${signatureInfos.length} transactions from ${endpoint}`);
-                    break;
+                    // Successfully got transactions, continue to parse them
+                } else {
+                    console.log('⚠️ No transactions found for this wallet');
+                    return [];
                 }
             } catch (error) {
-                console.error(`❌ RPC endpoint ${endpoint} failed:`, error.message);
-                if (i === rpcEndpoints[network].length - 1) {
-                    console.error('All RPC endpoints failed. Consider getting a free API key from Helius or QuickNode.');
-                    return [];
+                console.log('Phantom provider failed for transactions:', error.message);
+                console.log('Falling back to public RPCs...');
+                connection = null;
+            }
+        }
+
+        // Fallback to public RPCs if Phantom method didn't work
+        if (!connection || signatureInfos.length === 0) {
+            for (let i = 0; i < rpcEndpoints[network].length; i++) {
+                const endpoint = rpcEndpoints[network][i];
+                try {
+                    console.log(`📡 Trying RPC endpoint ${i + 1}/${rpcEndpoints[network].length} for transactions: ${endpoint.slice(0, 50)}...`);
+                    connection = new Connection(endpoint, 'finalized'); 
+                    signatureInfos = await connection.getSignaturesForAddress(
+                        new PublicKey(publicKey),
+                        { limit: 20, commitment: 'finalized' }
+                    );
+                    
+                    console.log(`Found ${signatureInfos.length} transaction signatures`);
+                    
+                    if (signatureInfos && signatureInfos.length > 0) {
+                        console.log(`✅ Successfully fetched ${signatureInfos.length} transactions from endpoint ${i + 1}`);
+                        break;
+                    } else if (signatureInfos.length === 0) {
+                        console.log('⚠️ No transactions found for this wallet');
+                        return [];
+                    }
+                } catch (error) {
+                    console.error(`❌ RPC endpoint ${i + 1} failed for transactions:`, error.message);
+                    if (i === rpcEndpoints[network].length - 1) {
+                        console.error('All RPC endpoints failed for transactions.');
+                        return [];
+                    }
                 }
             }
         }
@@ -187,10 +287,13 @@ const Dashboard = () => {
         const signatures = signatureInfos.map(info => info.signature);
         
         try {
+            console.log(`📥 Fetching full transaction data for ${signatures.length} signatures...`);
             const transactions = await connection.getParsedTransactions(
                 signatures, 
                 { maxSupportedTransactionVersion: 0, commitment: 'finalized' }
             );
+            
+            console.log(`✅ Successfully parsed ${transactions.filter(t => t !== null).length} transactions`);
 
             return transactions.map((tx, index) => {
                 const sigInfo = signatureInfos[index];
@@ -264,6 +367,10 @@ const Dashboard = () => {
     const updateWalletBalances = useCallback(async () => {
       if (connectedWallets.length === 0) return;
       
+      console.log('=== Updating Wallet Balances ===');
+      console.log('Current SOL Price:', solPrice);
+      console.log('Network:', network);
+      
       const newBalances = {};
       let totalSOL = 0;
       
@@ -272,6 +379,7 @@ const Dashboard = () => {
         
         if (wallet.type === 'solana' && wallet.publicKey) {
           const balance = await fetchWalletBalance(wallet.publicKey);
+          console.log(`Wallet ${wallet.name} (${uniqueKey.slice(0, 8)}...): ${balance} SOL`);
           newBalances[uniqueKey] = balance;
           totalSOL += balance;
         } else if (wallet.type === 'ethereum' && wallet.address) {
@@ -279,8 +387,12 @@ const Dashboard = () => {
         }
       }
       
+      console.log('Total SOL:', totalSOL);
+      const calculatedUSD = network === 'mainnet-beta' ? totalSOL * solPrice : 0;
+      console.log('Calculated USD:', calculatedUSD);
+      
       setWalletBalances(newBalances);
-      setTotalBalanceUSD(network === 'mainnet-beta' ? totalSOL * solPrice : 0);
+      setTotalBalanceUSD(calculatedUSD);
     }, [connectedWallets, solPrice, network]);
 
     const updateRecentTransactions = useCallback(async () => {
@@ -303,10 +415,12 @@ const Dashboard = () => {
 
     // --- WALLET CONNECTION LOGIC ---
     const connectWallet = async (wallet) => {
+      console.log('🔌 Connecting wallet:', wallet.name);
       try {
         if (wallet.type === 'solana') {
           // Solflare and Phantom use .connect()
           const response = await wallet.provider.connect();
+          console.log('Wallet response:', response);
           
           let publicKeyString = response?.publicKey?.toString();
           
@@ -316,12 +430,14 @@ const Dashboard = () => {
           }
 
           if (publicKeyString) {
+          console.log('✅ Wallet connected with publicKey:', publicKeyString);
           const newWallet = {
             ...wallet,
                 publicKey: publicKeyString,
             connected: true
           };
               if (!connectedWallets.some(w => w.publicKey === newWallet.publicKey)) {
+          console.log('Adding wallet to connectedWallets');
           setConnectedWallets(prev => [...prev, newWallet]);
           
           // Sync to Firestore automatically
@@ -449,15 +565,14 @@ const Dashboard = () => {
     
     // --- DATA FETCH EFFECTS ---
     useEffect(() => {
+      // Fetch SOL price when network changes
       fetchSolPrice();
+      
+      // Reset balances when network changes
       setTotalBalanceUSD(0);
       setWalletBalances({});
       setRecentTransactions([]);
-      if (connectedWallets.length > 0) {
-        updateWalletBalances();
-        updateRecentTransactions();
-      }
-    }, [network, connectedWallets.length]);
+    }, [network]);
 
     // Initialize user document in Firestore when user signs in
     useEffect(() => {
@@ -489,16 +604,21 @@ const Dashboard = () => {
     // Restore connected wallets from localStorage on mount
     useEffect(() => {
       if (user?.email) {
+        console.log('📂 Restoring wallets from localStorage for:', user.email);
         const savedWallets = localStorage.getItem(`connectedWallets_${user.email}`);
         if (savedWallets) {
           try {
             const walletData = JSON.parse(savedWallets);
+            console.log('Restored wallet data:', walletData);
             if (walletData && walletData.length > 0) {
               setConnectedWallets(walletData);
+              console.log('✅ Restored', walletData.length, 'wallet(s)');
             }
           } catch (error) {
-            // Failed to parse saved wallets
+            console.error('Failed to parse saved wallets:', error);
           }
+        } else {
+          console.log('No saved wallets found');
         }
       }
     }, [user?.email]);
@@ -533,10 +653,11 @@ const Dashboard = () => {
 
     useEffect(() => {
       if (connectedWallets.length > 0 && (solPrice > 0 || network === 'devnet')) {
+        console.log('Triggering balance update - solPrice changed to:', solPrice);
         updateWalletBalances();
         updateRecentTransactions();
       }
-    }, [solPrice, updateWalletBalances, updateRecentTransactions]);
+    }, [solPrice, connectedWallets.length, network, updateWalletBalances, updateRecentTransactions]);
 
     useEffect(() => {
       if (activeTab === 'transactions') {
@@ -614,11 +735,11 @@ const Dashboard = () => {
     return (
         <div className="flex items-center justify-between p-4 bg-gray-800/70 backdrop-blur-sm border-b border-gray-700 hover:bg-gray-800 transition duration-300 group">
             <div className="flex items-center space-x-3">
-                <div className="w-10 h-10 rounded-full flex items-center justify-center bg-gradient-to-br from-cyan-900/50 to-purple-900/50 border border-cyan-700/50 p-1.5">
+                <div className="w-10 h-10 rounded-lg flex items-center justify-center bg-gradient-to-br from-cyan-900/50 to-purple-900/50 border border-cyan-700/50 p-1.5">
                     {walletIcon ? (
                         <img src={walletIcon} alt={wallet.name} className="w-full h-full object-contain" />
                     ) : (
-                        <div className="w-full h-full rounded-full bg-gradient-to-br from-cyan-600 to-purple-600 flex items-center justify-center text-white text-sm font-bold">
+                        <div className="w-full h-full rounded-md bg-gradient-to-br from-cyan-600 to-purple-600 flex items-center justify-center text-white text-sm font-bold">
                             {wallet.name?.charAt(0) || 'W'}
                         </div>
                     )}
@@ -633,10 +754,10 @@ const Dashboard = () => {
             <div className="flex items-center space-x-4">
                 <div className="text-right">
                     <p className="font-bold text-xl text-white font-mono">
-                        {wallet.type === 'ethereum' ? 'N/A' : `${balance.toFixed(2)} SOL`}
+                        {wallet.type === 'ethereum' ? 'N/A' : `${balance.toFixed(5)} SOL`}
                     </p>
                     {wallet.type === 'solana' && network !== 'devnet' && (
-                        <p className="text-xs text-cyan-400 font-mono">${usdValue.toFixed(2)}</p>
+                        <p className="text-xs text-cyan-400 font-mono">${usdValue.toFixed(4)}</p>
                     )}
                 </div>
                 <button
@@ -1043,7 +1164,7 @@ const Dashboard = () => {
                     <div className="flex flex-col space-y-4 sm:space-y-6">
                         <p className="premium-label text-gray-400 tracking-wide text-xs sm:text-sm">Total Balance</p>
                         <h2 className="text-4xl sm:text-5xl md:text-6xl lg:text-7xl premium-heading text-cyan-400 tracking-tighter">
-                            {network === 'devnet' ? '---' : `$${totalBalanceUSD.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                            {network === 'devnet' ? '---' : `$${totalBalanceUSD.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`}
                   </h2>
                         {network !== 'devnet' && <p className="premium-mono text-xs sm:text-sm text-gray-500">SOL Price: ${solPrice.toFixed(2)}</p>}
 
@@ -1174,7 +1295,7 @@ const Dashboard = () => {
                         onClick={() => { connectWallet(wallet); setShowWalletModal(false); }}
                         className="w-full flex items-center p-4 bg-gray-800/70 rounded-xl hover:bg-gray-800 transition-all border border-cyan-900/50 cursor-pointer"
                       >
-                        <div className="w-12 h-12 bg-gray-900 rounded-full flex items-center justify-center mr-4 p-2">
+                        <div className="w-12 h-12 bg-gray-900 rounded-lg flex items-center justify-center mr-4 p-2">
                           <img src={wallet.iconPath} alt={wallet.name} className="w-full h-full object-contain" />
                         </div>
                         <div className="text-left">
@@ -1234,11 +1355,11 @@ const Dashboard = () => {
                         >
                           <div className="flex items-center space-x-4 flex-1">
                             {/* Wallet Icon */}
-                            <div className="w-12 h-12 rounded-full flex items-center justify-center bg-gradient-to-br from-cyan-900/50 to-purple-900/50 border border-cyan-700/50 p-2">
+                            <div className="w-12 h-12 rounded-lg flex items-center justify-center bg-gradient-to-br from-cyan-900/50 to-purple-900/50 border border-cyan-700/50 p-2">
                               {walletIcon ? (
                                 <img src={walletIcon} alt={wallet.name} className="w-full h-full object-contain" />
                               ) : (
-                                <div className="w-full h-full rounded-full bg-gradient-to-br from-cyan-600 to-purple-600 flex items-center justify-center text-white text-sm font-bold">
+                                <div className="w-full h-full rounded-md bg-gradient-to-br from-cyan-600 to-purple-600 flex items-center justify-center text-white text-sm font-bold">
                                   {wallet.name?.charAt(0) || 'W'}
                                 </div>
                               )}
@@ -1327,7 +1448,7 @@ const Dashboard = () => {
                     {/* Wallet Info */}
                     <div className="bg-gray-800/50 rounded-xl p-6 border border-gray-700">
                       <div className="flex items-center space-x-4 mb-6">
-                        <div className="w-16 h-16 rounded-full flex items-center justify-center bg-gradient-to-br from-cyan-900/50 to-purple-900/50 border border-cyan-700/50 p-3">
+                        <div className="w-16 h-16 rounded-xl flex items-center justify-center bg-gradient-to-br from-cyan-900/50 to-purple-900/50 border border-cyan-700/50 p-3">
                           {walletIconPaths[selectedReceiveWallet.name] ? (
                             <img 
                               src={walletIconPaths[selectedReceiveWallet.name]} 
@@ -1335,7 +1456,7 @@ const Dashboard = () => {
                               className="w-full h-full object-contain" 
                             />
                           ) : (
-                            <div className="w-full h-full rounded-full bg-gradient-to-br from-cyan-600 to-purple-600 flex items-center justify-center text-white text-xl font-bold">
+                            <div className="w-full h-full rounded-lg bg-gradient-to-br from-cyan-600 to-purple-600 flex items-center justify-center text-white text-xl font-bold">
                               {selectedReceiveWallet.name?.charAt(0) || 'W'}
                             </div>
                           )}
