@@ -265,7 +265,7 @@ const ManualFraudReporting = () => {
             {isSubmitting ? (
               <>
                 <Loader className="w-5 h-5 animate-spin" />
-                <span>Submitting...</span>
+                <span>Submitting....</span>
               </>
             ) : (
               <>
