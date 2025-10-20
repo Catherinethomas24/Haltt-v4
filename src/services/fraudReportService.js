@@ -68,7 +68,7 @@ export const submitFraudReport = async (walletAddress, category, note, userEmail
         updates.notes = arrayUnion({
           email: userEmail,
           note: note.trim(),
-          timestamp: serverTimestamp()
+          timestamp: new Date().toISOString()
         });
       }
 
@@ -90,7 +90,7 @@ export const submitFraudReport = async (walletAddress, category, note, userEmail
         notes: note && note.trim() ? [{
           email: userEmail,
           note: note.trim(),
-          timestamp: serverTimestamp()
+          timestamp: new Date().toISOString()
         }] : [],
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp()
