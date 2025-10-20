@@ -16,6 +16,22 @@ service cloud.firestore {
       allow update, delete: if false; // Audit logs should not be modified
     }
     
+    // Fraud Reports collection - authenticated users can create and update reports
+    match /reports/{reportId} {
+      // Allow authenticated users to read all reports
+      allow read: if request.auth != null;
+      
+      // Allow authenticated users to create new reports
+      allow create: if request.auth != null 
+        && request.resource.data.reporters.size() == 1
+        && request.auth.token.email in request.resource.data.reporters;
+      
+      // Allow authenticated users to update reports (add themselves as reporters)
+      allow update: if request.auth != null
+        && request.auth.token.email in request.resource.data.reporters
+        && !(request.auth.token.email in resource.data.reporters);
+    }
+    
     // Default deny all other collections
     match /{document=**} {
       allow read, write: if false;

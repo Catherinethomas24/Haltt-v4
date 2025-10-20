@@ -70,35 +70,42 @@ const ManualFraudReporting = () => {
       return;
     }
 
-    setIsSubmitting(true);
-
     try {
-      const result = await submitFraudReport(
-        walletAddress.trim(),
-        category,
-        note,
-        user.email
-      );
+      setIsSubmitting(true);
+      setShowSuccess(false);
+      setShowError(false);
+      setMessage('');
+
+      // Submit the report
+      const result = await submitFraudReport(walletAddress, category, note, user.email);
 
       if (result.success) {
+        setShowSuccess(true);
         setMessage(result.message);
         setReportFrequency(result.frequency);
-        setShowSuccess(true);
         
         // Reset form after 3 seconds
         setTimeout(() => {
           resetForm();
         }, 3000);
       } else {
-        setMessage(result.message);
         setShowError(true);
-        setTimeout(() => setShowError(false), 4000);
+        setMessage(result.message);
       }
     } catch (error) {
-      console.error('Error submitting report:', error);
-      setMessage('Failed to submit report. Please try again.');
+      console.error('Fraud report submission error:', error);
       setShowError(true);
-      setTimeout(() => setShowError(false), 3000);
+      
+      // Show detailed error message
+      if (error.code === 'permission-denied') {
+        setMessage('Permission denied. Please ensure you are signed in and Firestore rules are configured.');
+      } else if (error.code === 'unavailable') {
+        setMessage('Network error. Please check your internet connection and try again.');
+      } else if (error.message) {
+        setMessage(`Error: ${error.message}`);
+      } else {
+        setMessage('Failed to submit report. Please try again.');
+      }
     } finally {
       setIsSubmitting(false);
     }
