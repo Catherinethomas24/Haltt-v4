@@ -69,13 +69,19 @@ const Dashboard = () => {
     const [transactionSignature, setTransactionSignature] = useState(null);
     const [transactionError, setTransactionError] = useState(null);
     
-    // --- RPC ENDPOINTS (route via serverless proxy to keep API keys server-side) ---
+    // --- RPC ENDPOINTS (Prioritize paid/premium endpoints) ---
     const rpcEndpoints = {
         'mainnet-beta': [
-            '/api/solana-rpc?network=mainnet-beta' // Vercel serverless proxy (uses HELIUS_API_KEY on server)
+            'https://mainnet.helius-rpc.com/?api-key=277fd0d2-3b36-46a0-8ecc-24d7cac3a071', // Helius (PREMIUM - use first)
+            'https://solitary-distinguished-uranium.solana-mainnet.quiknode.pro/QN_b089837dc0d445729831b789cc04a22c/', // QuickNode
+            'https://api.mainnet-beta.solana.com', // Public Solana RPC (fallback)
+            'https://solana-api.projectserum.com', // Serum RPC (fallback)
+            'https://rpc.ankr.com/solana' // Ankr public RPC (fallback)
         ],
         'devnet': [
-            '/api/solana-rpc?network=devnet' // Vercel serverless proxy (uses HELIUS_API_KEY on server)
+            'https://devnet.helius-rpc.com/?api-key=277fd0d2-3b36-46a0-8ecc-24d7cac3a071', // Helius Devnet
+            'https://api.devnet.solana.com', // Public devnet (fallback)
+            'https://rpc.ankr.com/solana_devnet' // Ankr devnet (fallback)
         ]
     };
     
@@ -188,8 +194,8 @@ const Dashboard = () => {
       if (window.solana && network === 'mainnet-beta') {
         try {
           console.log('Creating connection using Phantom provider...');
-          // Create a connection using our RPC endpoints
-          const connection = new Connection(rpcEndpoints[network][0], {
+          // Create a connection using Phantom's internal RPC
+          const connection = new Connection('https://api.mainnet-beta.solana.com', {
             commitment: 'confirmed',
             fetch: window.solana._rpcRequest ? window.solana._rpcRequest.bind(window.solana) : undefined
           });
@@ -241,7 +247,7 @@ const Dashboard = () => {
         if (window.solana && network === 'mainnet-beta') {
             try {
                 console.log('🔮 Trying Phantom provider for transactions...');
-                connection = new Connection(rpcEndpoints[network][0], {
+                connection = new Connection('https://api.mainnet-beta.solana.com', {
                     commitment: 'finalized',
                     fetch: window.solana._rpcRequest ? window.solana._rpcRequest.bind(window.solana) : undefined
                 });
@@ -554,27 +560,62 @@ const Dashboard = () => {
     // Handler for sending to trusted contact
     const handleSendToContact = (contact) => {
       // Pre-fill recipient address and open send modal
-      setRecipientAddress(contact.address);
+      const safeAddress = typeof contact?.address === 'string' ? contact.address.trim() : String(contact?.address || '').trim();
+      setRecipientAddress(safeAddress);
       setShowSendModal(true);
       setSendStep(1);
       // Automatically trigger risk check with the contact address
       setTimeout(() => {
-        handleCheckRecipient(contact.address);
+        handleCheckRecipient(safeAddress);
       }, 100);
     };
 
+    // Normalize a user-provided address or Solana Pay URI into a base58 address
+    const normalizeRecipientAddress = (input) => {
+      const raw = String(input || '').trim();
+      if (!raw) return '';
+      // If it's a Solana Pay URI like solana:<address>?amount=...
+      if (raw.toLowerCase().startsWith('solana:')) {
+        try {
+          const uri = new URL(raw.replace('solana:', 'https://solana.pay/'));
+          // Pathname will be "/<address>"
+          const path = uri.pathname || '';
+          const addr = path.startsWith('/') ? path.slice(1) : path;
+          return addr || '';
+        } catch (_) {
+          // Fallback simple parse if URL fails
+          const noScheme = raw.slice(7); // remove 'solana:'
+          const qIndex = noScheme.indexOf('?');
+          return (qIndex >= 0 ? noScheme.slice(0, qIndex) : noScheme).trim();
+        }
+      }
+      // If it's a full URL containing the address as last segment
+      if (/^https?:\/\//i.test(raw)) {
+        try {
+          const u = new URL(raw);
+          const segs = u.pathname.split('/').filter(Boolean);
+          if (segs.length > 0) return segs[segs.length - 1];
+        } catch (_) { /* ignore */ }
+      }
+      // Otherwise, attempt to sanitize to base58-only characters
+      const base58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+      const sanitized = Array.from(raw).filter(ch => base58.includes(ch)).join('');
+      return sanitized;
+    };
+
     const handleCheckRecipient = async (addressToCheck = null) => {
-      console.log('🔘 Check button clicked!');
-      console.log('📍 addressToCheck:', addressToCheck);
-      console.log('📍 recipientAddress state:', recipientAddress);
-      
-      // Use provided address or fall back to state
-      const addressToValidate = addressToCheck || recipientAddress;
-      
-      console.log('✅ Final address to validate:', addressToValidate);
-      
-      if (!addressToValidate || addressToValidate.trim().length === 0) {
-        console.error('❌ No address provided!');
+      // Normalize provided address or fall back to state
+      let raw = addressToCheck ?? recipientAddress;
+      // If a click event was passed accidentally, ignore it and use state
+      if (raw && (raw.preventDefault || raw.nativeEvent || (raw.target && raw.currentTarget))) {
+        raw = recipientAddress;
+      }
+      if (raw && typeof raw === 'object' && 'address' in raw) {
+        raw = raw.address;
+      }
+      const addressToValidate = normalizeRecipientAddress(raw);
+
+      if (!addressToValidate || addressToValidate.length === 0) {
         setTransactionError('Please enter a valid Solana address');
         return;
       }
@@ -585,6 +626,11 @@ const Dashboard = () => {
       } catch (error) {
         setTransactionError('Invalid Solana address format');
         return;
+      }
+
+      // Persist normalized address in state so subsequent steps use the correct value
+      if (addressToValidate !== recipientAddress) {
+        setRecipientAddress(addressToValidate);
       }
 
       setCheckingRisk(true);
@@ -1925,7 +1971,7 @@ const Dashboard = () => {
                     )}
 
                     <button
-                      onClick={handleCheckRecipient}
+                      onClick={() => handleCheckRecipient()}
                       disabled={checkingRisk || !recipientAddress}
                       className="w-full bg-cyan-600 hover:bg-cyan-500 disabled:bg-gray-700 disabled:cursor-not-allowed text-white px-6 py-3 rounded-lg font-semibold transition-all flex items-center justify-center space-x-2 cursor-pointer"
                     >
