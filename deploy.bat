@@ -1,0 +1,9 @@
+@echo off
+echo Adding changes...
+git add .
+echo Committing...
+git commit -m "Fix-serverless-function"
+echo Pushing to GitHub...
+git push origin main
+echo Done! Vercel will auto-deploy in 2-3 minutes.
+pause

@@ -1,5 +1,5 @@
 // Vercel Serverless Function for ChainAbuse API
-const fetch = require('node-fetch');
+// Node 18+ has native fetch, no need to import
 
 const CHAINABUSE_API_KEY = process.env.CHAINABUSE_API_KEY;
 
