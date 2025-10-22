@@ -69,18 +69,13 @@ const Dashboard = () => {
     const [transactionSignature, setTransactionSignature] = useState(null);
     const [transactionError, setTransactionError] = useState(null);
     
-    // --- RPC ENDPOINTS (Prioritize paid/premium endpoints) ---
+    // --- RPC ENDPOINTS (route via serverless proxy to keep API keys server-side) ---
     const rpcEndpoints = {
         'mainnet-beta': [
-            'https://mainnet.helius-rpc.com/?api-key=277fd0d2-3b36-46a0-8ecc-24d7cac3a071', // Helius (PREMIUM - use first)
-            'https://solitary-distinguished-uranium.solana-mainnet.quiknode.pro/QN_b089837dc0d445729831b789cc04a22c/', // QuickNode
-            'https://rpc.ankr.com/solana', // Ankr public RPC
-            'https://solana.public-rpc.com' // Alternative public RPC
+            '/api/solana-rpc?network=mainnet-beta' // Vercel serverless proxy (uses HELIUS_API_KEY on server)
         ],
         'devnet': [
-            'https://devnet.helius-rpc.com/?api-key=277fd0d2-3b36-46a0-8ecc-24d7cac3a071', // Helius Devnet
-            'https://api.devnet.solana.com', // Public devnet (fallback)
-            'https://rpc.ankr.com/solana_devnet' // Ankr devnet (fallback)
+            '/api/solana-rpc?network=devnet' // Vercel serverless proxy (uses HELIUS_API_KEY on server)
         ]
     };
     
