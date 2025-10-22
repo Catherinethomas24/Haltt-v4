@@ -1,11 +1,15 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth, auth, signOut } from '../firebase';
-import { LogOut, User, Mail, Home, Zap, Wallet, Plus, X, Send, Download, TrendingUp, History, AlertTriangle, Cloud, Users, Trash2, FileText, Receipt, Archive, QrCode, Shield, Flag, UserX, UsersRound, Menu, ChevronLeft, Copy, Check, ExternalLink, Clock, CheckCircle, XCircle } from 'lucide-react';
-import { Connection, PublicKey, LAMPORTS_PER_SOL, SystemProgram } from '@solana/web3.js';
+import { LogOut, User, Mail, Home, Zap, Wallet, Plus, X, Send, Download, TrendingUp, History, AlertTriangle, Cloud, Users, Trash2, FileText, Receipt, Archive, QrCode, Shield, Flag, UserX, UsersRound, UserPlus, Menu, ChevronLeft, Copy, Check, ExternalLink, Clock, CheckCircle, XCircle, Link as LinkIcon, Search } from 'lucide-react';
+import { Connection, PublicKey, LAMPORTS_PER_SOL, SystemProgram, Transaction, TransactionMessage, VersionedTransaction } from '@solana/web3.js';
 import { syncWalletsToFirestore, removeWalletFromUser, initializeUserDocument } from '../services/walletService';
 import { logWalletConnection, logWalletDisconnection } from '../services/auditLogService';
 import { testFirestoreConnection } from '../utils/testFirestore';
 import QRCodeStyling from 'qr-code-styling';
+import { assessWalletRisk } from '../services/fraudDetectionService';
+import { isAddressBlocked, getBlocklistEntry } from '../services/blocklistService';
+import { getTrustedContacts } from '../services/trustedContactsService';
+import { saveReceipt } from '../services/receiptService';
 
 // Import tab components
 import AuditLogs from './tabs/AuditLogs';
@@ -49,17 +53,35 @@ const Dashboard = () => {
     const [profileImageError, setProfileImageError] = useState(false);
     const [profileImageUrl, setProfileImageUrl] = useState(null);
     const [copiedSignature, setCopiedSignature] = useState(null);
+    const [trustedContacts, setTrustedContacts] = useState([]);
+    const [showContactsModal, setShowContactsModal] = useState(false);
     
-    // --- RPC ENDPOINTS (Public/Generic only) ---
+    // --- SEND MODAL STATE ---
+    const [showSendModal, setShowSendModal] = useState(false);
+    const [sendStep, setSendStep] = useState(1); // 1: Address, 2: Risk Check, 3: Amount/Token, 4: Confirm, 5: Success
+    const [recipientAddress, setRecipientAddress] = useState('');
+    const [riskAssessment, setRiskAssessment] = useState(null);
+    const [checkingRisk, setCheckingRisk] = useState(false);
+    const [sendAmount, setSendAmount] = useState('');
+    const [selectedToken, setSelectedToken] = useState('SOL');
+    const [selectedSendWallet, setSelectedSendWallet] = useState(null);
+    const [sendingTransaction, setSendingTransaction] = useState(false);
+    const [transactionSignature, setTransactionSignature] = useState(null);
+    const [transactionError, setTransactionError] = useState(null);
+    
+    // --- RPC ENDPOINTS (Prioritize paid/premium endpoints) ---
     const rpcEndpoints = {
         'mainnet-beta': [
-            'https://solitary-distinguished-uranium.solana-mainnet.quiknode.pro/QN_b089837dc0d445729831b789cc04a22c/',
-            'https://rpc.helius.xyz/?api-key=277fd0d2-3b36-46a0-8ecc-24d7cac3a071',
-            'https://solana-api.projectserum.com',
-            'https://api.mainnet-beta.solana.com'
+            'https://mainnet.helius-rpc.com/?api-key=277fd0d2-3b36-46a0-8ecc-24d7cac3a071', // Helius (PREMIUM - use first)
+            'https://solitary-distinguished-uranium.solana-mainnet.quiknode.pro/QN_b089837dc0d445729831b789cc04a22c/', // QuickNode
+            'https://api.mainnet-beta.solana.com', // Public Solana RPC (fallback)
+            'https://solana-api.projectserum.com', // Serum RPC (fallback)
+            'https://rpc.ankr.com/solana' // Ankr public RPC (fallback)
         ],
         'devnet': [
-            'https://api.devnet.solana.com'
+            'https://devnet.helius-rpc.com/?api-key=277fd0d2-3b36-46a0-8ecc-24d7cac3a071', // Helius Devnet
+            'https://api.devnet.solana.com', // Public devnet (fallback)
+            'https://rpc.ankr.com/solana_devnet' // Ankr devnet (fallback)
         ]
     };
     
@@ -520,6 +542,204 @@ const Dashboard = () => {
         }
       }
     };
+
+    // --- SEND MODAL HANDLERS ---
+    const resetSendModal = () => {
+      setSendStep(1);
+      setRecipientAddress('');
+      setRiskAssessment(null);
+      setCheckingRisk(false);
+      setSendAmount('');
+      setSelectedToken('SOL');
+      setSelectedSendWallet(null);
+      setSendingTransaction(false);
+      setTransactionSignature(null);
+      setTransactionError(null);
+    };
+
+    // Handler for sending to trusted contact
+    const handleSendToContact = (contact) => {
+      // Pre-fill recipient address and open send modal
+      setRecipientAddress(contact.address);
+      setShowSendModal(true);
+      setSendStep(1);
+      // Automatically trigger risk check with the contact address
+      setTimeout(() => {
+        handleCheckRecipient(contact.address);
+      }, 100);
+    };
+
+    const handleCheckRecipient = async (addressToCheck = null) => {
+      // Use provided address or fall back to state
+      const addressToValidate = addressToCheck || recipientAddress;
+      
+      if (!addressToValidate || addressToValidate.trim().length === 0) {
+        setTransactionError('Please enter a valid Solana address');
+        return;
+      }
+
+      // Validate Solana address format (basic check)
+      try {
+        new PublicKey(addressToValidate);
+      } catch (error) {
+        setTransactionError('Invalid Solana address format');
+        return;
+      }
+
+      setCheckingRisk(true);
+      setTransactionError(null);
+
+      try {
+        // STEP 1: Check if address is in user's blocklist
+        const blocked = await isAddressBlocked(user.email, addressToValidate);
+        
+        if (blocked) {
+          const blocklistEntry = await getBlocklistEntry(user.email, addressToValidate);
+          setRiskAssessment({
+            safe: false,
+            riskLevel: 'BLOCKED',
+            riskScore: 100,
+            reasons: ['This address is in your blocklist'],
+            blocklistEntry: blocklistEntry,
+            isBlocked: true
+          });
+          setSendStep(2);
+          setCheckingRisk(false);
+          return;
+        }
+
+        // STEP 2: Perform fraud risk assessment
+        const assessment = await assessWalletRisk(addressToValidate);
+        setRiskAssessment({
+          ...assessment,
+          isBlocked: false
+        });
+        
+        if (assessment.safe) {
+          setSendStep(2); // Move to success/safe step
+        } else {
+          setSendStep(2); // Show risk warning
+        }
+      } catch (error) {
+        console.error('Risk assessment failed:', error);
+        setTransactionError('Failed to assess wallet risk. Please try again.');
+      } finally {
+        setCheckingRisk(false);
+      }
+    };
+
+    const handleProceedToTransaction = () => {
+      if (riskAssessment && riskAssessment.safe) {
+        setSendStep(3); // Move to amount/token selection
+      }
+    };
+
+    const handleSendTransaction = async () => {
+      if (!selectedSendWallet || !sendAmount || parseFloat(sendAmount) <= 0) {
+        setTransactionError('Please fill in all required fields');
+        return;
+      }
+
+      const amount = parseFloat(sendAmount);
+      const walletBalance = walletBalances[selectedSendWallet.publicKey] || 0;
+
+      if (amount > walletBalance) {
+        setTransactionError(`Insufficient balance. Available: ${walletBalance.toFixed(5)} SOL`);
+        return;
+      }
+
+      setSendingTransaction(true);
+      setTransactionError(null);
+
+      try {
+        // Get the wallet provider
+        const wallet = availableWallets.find(w => w.name === selectedSendWallet.name);
+        
+        if (!wallet || !wallet.provider) {
+          throw new Error('Wallet provider not found');
+        }
+
+        // Ensure wallet is connected
+        if (!wallet.provider.isConnected) {
+          await wallet.provider.connect();
+        }
+
+        // Try multiple RPC endpoints until one works
+        let connection = null;
+        let blockhash = null;
+        
+        for (let i = 0; i < rpcEndpoints[network].length; i++) {
+          try {
+            console.log(`🔄 Trying RPC endpoint ${i + 1}/${rpcEndpoints[network].length}: ${rpcEndpoints[network][i].slice(0, 50)}...`);
+            connection = new Connection(rpcEndpoints[network][i], 'confirmed');
+            const result = await connection.getLatestBlockhash('confirmed');
+            blockhash = result.blockhash;
+            console.log('✅ Successfully got blockhash from RPC endpoint', i + 1);
+            break;
+          } catch (error) {
+            console.error(`❌ RPC endpoint ${i + 1} failed:`, error.message);
+            if (i === rpcEndpoints[network].length - 1) {
+              throw new Error('All RPC endpoints failed. Please check your internet connection or try again later.');
+            }
+          }
+        }
+
+        if (!connection || !blockhash) {
+          throw new Error('Failed to connect to Solana network. Please try again.');
+        }
+
+        // Create transfer instruction
+        const transferInstruction = SystemProgram.transfer({
+          fromPubkey: new PublicKey(selectedSendWallet.publicKey),
+          toPubkey: new PublicKey(recipientAddress),
+          lamports: amount * LAMPORTS_PER_SOL
+        });
+
+        // Create transaction
+        const transaction = new Transaction().add(transferInstruction);
+        transaction.recentBlockhash = blockhash;
+        transaction.feePayer = new PublicKey(selectedSendWallet.publicKey);
+
+        // Sign and send transaction using wallet provider
+        const { signature } = await wallet.provider.signAndSendTransaction(transaction);
+
+        console.log('Transaction sent:', signature);
+        setTransactionSignature(signature);
+        setSendStep(4); // Move to success step
+
+        // Save receipt to Firestore
+        try {
+          await saveReceipt({
+            userId: user.email,
+            transactionSignature: signature,
+            walletAddress: selectedSendWallet.publicKey,
+            walletName: selectedSendWallet.name,
+            recipientAddress: recipientAddress,
+            amount: amount,
+            token: selectedToken,
+            status: 'success',
+            network: network,
+            type: 'send'
+          });
+          console.log('✅ Receipt saved successfully');
+        } catch (receiptError) {
+          console.error('Failed to save receipt:', receiptError);
+          // Don't fail the transaction if receipt saving fails
+        }
+
+        // Refresh balances after transaction
+        setTimeout(() => {
+          updateWalletBalances();
+          updateRecentTransactions();
+        }, 2000);
+
+      } catch (error) {
+        console.error('Transaction failed:', error);
+        setTransactionError(error.message || 'Transaction failed. Please try again.');
+      } finally {
+        setSendingTransaction(false);
+      }
+    };
     
     // --- FIXED WALLET DETECTION LOGIC ---
     const detectWallets = useCallback(() => {
@@ -585,6 +805,21 @@ const Dashboard = () => {
             // Initialization error silenced
           });
       }
+    }, [user]);
+
+    // Load trusted contacts when user signs in
+    useEffect(() => {
+      const loadContacts = async () => {
+        if (user?.email) {
+          try {
+            const contacts = await getTrustedContacts(user.email);
+            setTrustedContacts(contacts);
+          } catch (error) {
+            console.error('Error loading trusted contacts:', error);
+          }
+        }
+      };
+      loadContacts();
     }, [user]);
 
     // Save connected wallets to localStorage whenever they change
@@ -957,21 +1192,23 @@ const Dashboard = () => {
             <div className="space-y-2">
               <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider px-3 mt-4">Quick Actions</h3>
               
+              {/* QR Codes - FIRST */}
               <div 
                 onClick={() => {
-                  setActiveView('auditLogs');
+                  setActiveView('exportBarcode');
                   setSidebarOpen(false);
                 }}
                 className={`flex items-center px-4 py-2.5 rounded-lg cursor-pointer transition-colors text-sm ${
-                  activeView === 'auditLogs' 
+                  activeView === 'exportBarcode' 
                     ? 'bg-cyan-900/40 text-cyan-400' 
                     : 'text-gray-400 hover:bg-cyan-900/20'
                 }`}
               >
-                <FileText className="w-4 h-4 mr-3" />
-                <span>Audit Logs</span>
+                <QrCode className="w-4 h-4 mr-3" />
+                <span>QR Codes</span>
               </div>
               
+              {/* Receipts - 3rd */}
               <div 
                 onClick={() => {
                   setActiveView('receipts');
@@ -987,34 +1224,20 @@ const Dashboard = () => {
                 <span>Receipts</span>
               </div>
               
+              {/* Audit Logs - 4th */}
               <div 
                 onClick={() => {
-                  setActiveView('storeReceipts');
+                  setActiveView('auditLogs');
                   setSidebarOpen(false);
                 }}
                 className={`flex items-center px-4 py-2.5 rounded-lg cursor-pointer transition-colors text-sm ${
-                  activeView === 'storeReceipts' 
+                  activeView === 'auditLogs' 
                     ? 'bg-cyan-900/40 text-cyan-400' 
                     : 'text-gray-400 hover:bg-cyan-900/20'
                 }`}
               >
-                <Archive className="w-4 h-4 mr-3" />
-                <span>Store Receipts</span>
-              </div>
-              
-              <div 
-                onClick={() => {
-                  setActiveView('exportBarcode');
-                  setSidebarOpen(false);
-                }}
-                className={`flex items-center px-4 py-2.5 rounded-lg cursor-pointer transition-colors text-sm ${
-                  activeView === 'exportBarcode' 
-                    ? 'bg-cyan-900/40 text-cyan-400' 
-                    : 'text-gray-400 hover:bg-cyan-900/20'
-                }`}
-              >
-                <QrCode className="w-4 h-4 mr-3" />
-                <span>QR Codes</span>
+                <FileText className="w-4 h-4 mr-3" />
+                <span>Audit Logs</span>
               </div>
             </div>
 
@@ -1139,7 +1362,7 @@ const Dashboard = () => {
                 {activeView === 'exportBarcode' && <ExportBarcode connectedWallets={connectedWallets} />}
                 {activeView === 'manualFraudReporting' && <ManualFraudReporting />}
                 {activeView === 'manageBlocklist' && <ManageBlocklist />}
-                {activeView === 'manageTrustedContacts' && <ManageTrustedContacts />}
+                {activeView === 'manageTrustedContacts' && <ManageTrustedContacts onSendToContact={handleSendToContact} />}
               </div>
             ) : connectedWallets.length === 0 ? (
                 // --- Empty State ---
@@ -1170,7 +1393,13 @@ const Dashboard = () => {
 
                         {/* Quick Actions (Matching Screenshot) */}
                         <div className="grid grid-cols-2 sm:flex sm:space-x-4 md:space-x-6 gap-4 sm:gap-0 pt-4 border-t border-gray-800">
-                            <button className="flex flex-col items-center space-y-2 text-cyan-400 hover:text-cyan-300 transition-colors group cursor-pointer">
+                            <button 
+                                onClick={() => {
+                                  resetSendModal();
+                                  setShowSendModal(true);
+                                }}
+                                className="flex flex-col items-center space-y-2 text-cyan-400 hover:text-cyan-300 transition-colors group cursor-pointer"
+                            >
                                 <div className="w-12 h-12 rounded-full bg-cyan-700/20 flex items-center justify-center border border-cyan-700/40 group-hover:bg-cyan-700/30 transition-all"><Send className="w-5 h-5" /></div>
                                 <span className="premium-label text-xs">Send</span>
                             </button>
@@ -1181,8 +1410,11 @@ const Dashboard = () => {
                                 <div className="w-12 h-12 rounded-full bg-cyan-700/20 flex items-center justify-center border border-cyan-700/40 group-hover:bg-cyan-700/30 transition-all"><Download className="w-5 h-5" /></div>
                                 <span className="premium-label text-xs">Receive</span>
                             </button>
-                            <button className="flex flex-col items-center space-y-2 text-cyan-400 hover:text-cyan-300 transition-colors group cursor-pointer">
-                                <div className="w-12 h-12 rounded-full bg-cyan-700/20 flex items-center justify-center border border-cyan-700/40 group-hover:bg-cyan-700/30 transition-all"><Users className="w-5 h-5" /></div>
+                            <button 
+                                onClick={() => setShowContactsModal(true)}
+                                className="flex flex-col items-center space-y-2 text-green-400 hover:text-green-300 transition-colors group cursor-pointer"
+                            >
+                                <div className="w-12 h-12 rounded-full bg-green-700/20 flex items-center justify-center border border-green-700/40 group-hover:bg-green-700/30 transition-all"><UsersRound className="w-5 h-5" /></div>
                                 <span className="premium-label text-xs">Contacts</span>
                             </button>
                             <button
@@ -1524,6 +1756,538 @@ const Dashboard = () => {
                         </div>
                       </div>
                     </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Contacts Modal */}
+        {showContactsModal && (
+          <div className="fixed inset-0 bg-black/70 backdrop-blur-lg flex items-center justify-center z-50 p-4 animate-fadeIn">
+            <div className="bg-gray-900/95 rounded-2xl shadow-2xl max-w-3xl w-full max-h-[90vh] overflow-y-auto border border-green-900/50 backdrop-blur-xl animate-slideUp">
+              <div className="p-6 md:p-8">
+                {/* Header */}
+                <div className="flex items-center justify-between mb-6 border-b border-gray-800 pb-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-12 h-12 rounded-full bg-green-700/20 flex items-center justify-center border border-green-700/40">
+                      <UsersRound className="w-6 h-6 text-green-400" />
+                    </div>
+                    <div>
+                      <h3 className="text-2xl font-bold text-white">Trusted Contacts</h3>
+                      <p className="text-sm text-gray-400">Quick send to your saved contacts</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setShowContactsModal(false)}
+                    className="text-gray-400 hover:text-cyan-400 transition-colors p-2 rounded-full hover:bg-gray-800 cursor-pointer"
+                  >
+                    <X className="w-6 h-6" />
+                  </button>
+                </div>
+
+                {/* Content */}
+                {trustedContacts.length === 0 ? (
+                  /* No Contacts - Navigate to Add */
+                  <div className="text-center py-12">
+                    <div className="w-20 h-20 rounded-full bg-green-700/20 flex items-center justify-center border border-green-700/40 mx-auto mb-6">
+                      <UserPlus className="w-10 h-10 text-green-400" />
+                    </div>
+                    <h4 className="text-xl font-bold text-white mb-3">No Trusted Contacts Yet</h4>
+                    <p className="text-gray-400 mb-6 max-w-md mx-auto">
+                      Add trusted contacts to send funds quickly and securely without re-entering addresses.
+                    </p>
+                    <button
+                      onClick={() => {
+                        setShowContactsModal(false);
+                        setActiveView('manageTrustedContacts');
+                      }}
+                      className="px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg font-semibold transition-colors flex items-center gap-2 mx-auto"
+                    >
+                      <UserPlus className="w-5 h-5" />
+                      Add Your First Contact
+                    </button>
+                  </div>
+                ) : (
+                  /* Display Contacts */
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between mb-4">
+                      <p className="text-gray-400 text-sm">
+                        {trustedContacts.length} contact{trustedContacts.length !== 1 ? 's' : ''} saved
+                      </p>
+                      <button
+                        onClick={() => {
+                          setShowContactsModal(false);
+                          setActiveView('manageTrustedContacts');
+                        }}
+                        className="text-sm text-green-400 hover:text-green-300 transition-colors flex items-center gap-1"
+                      >
+                        Manage Contacts
+                        <ExternalLink className="w-4 h-4" />
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-h-96 overflow-y-auto pr-2" style={{
+                      scrollbarWidth: 'thin',
+                      scrollbarColor: 'rgba(34, 197, 94, 0.3) transparent'
+                    }}>
+                      {trustedContacts.map((contact, index) => (
+                        <div
+                          key={index}
+                          className="bg-gray-800/50 rounded-lg p-4 border border-gray-700 hover:border-green-500/30 transition-colors"
+                        >
+                          <div className="flex items-start justify-between gap-3 mb-3">
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2 mb-2">
+                                <UsersRound className="w-4 h-4 text-green-400 flex-shrink-0" />
+                                <h4 className="text-white font-semibold truncate">{contact.name}</h4>
+                              </div>
+                              <code className="text-cyan-400 font-mono text-xs block truncate mb-2">
+                                {contact.address}
+                              </code>
+                              {contact.notes && (
+                                <p className="text-gray-400 text-xs truncate">
+                                  {contact.notes}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => {
+                              handleSendToContact(contact);
+                              setShowContactsModal(false);
+                            }}
+                            className="w-full px-3 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors flex items-center justify-center gap-2 text-sm font-semibold"
+                          >
+                            <Send className="w-4 h-4" />
+                            Send to {contact.name}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Send Modal */}
+        {showSendModal && (
+          <div className="fixed inset-0 bg-black/70 backdrop-blur-lg flex items-center justify-center z-50 p-4 animate-fadeIn">
+            <div className="bg-gray-900/95 rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto border border-cyan-900/50 backdrop-blur-xl animate-slideUp">
+              <div className="p-6 md:p-8">
+                {/* Header */}
+                <div className="flex items-center justify-between mb-6 border-b border-gray-800 pb-4">
+                  <div>
+                    <h3 className="text-2xl font-bold text-white">Send Crypto</h3>
+                    <p className="text-sm text-gray-400 mt-1">
+                      {sendStep === 1 && 'Enter recipient address'}
+                      {sendStep === 2 && 'Security Check Results'}
+                      {sendStep === 3 && 'Transaction Details'}
+                      {sendStep === 4 && 'Transaction Successful'}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setShowSendModal(false);
+                      resetSendModal();
+                    }}
+                    className="text-gray-400 hover:text-cyan-400 transition-colors p-2 rounded-full hover:bg-gray-800 cursor-pointer"
+                  >
+                    <X className="w-6 h-6" />
+                  </button>
+                </div>
+
+                {/* Step 1: Enter Recipient Address */}
+                {sendStep === 1 && (
+                  <div className="space-y-6">
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-300 mb-2">
+                        Recipient Solana Address
+                      </label>
+                      <input
+                        type="text"
+                        value={recipientAddress}
+                        onChange={(e) => setRecipientAddress(e.target.value)}
+                        placeholder="Enter Solana wallet address..."
+                        className="w-full bg-gray-800/70 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:border-transparent font-mono text-sm"
+                      />
+                    </div>
+
+                    {transactionError && (
+                      <div className="bg-red-900/30 border border-red-700/50 rounded-lg p-4 flex items-start space-x-3">
+                        <AlertTriangle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
+                        <p className="text-red-300 text-sm">{transactionError}</p>
+                      </div>
+                    )}
+
+                    <button
+                      onClick={handleCheckRecipient}
+                      disabled={checkingRisk || !recipientAddress}
+                      className="w-full bg-cyan-600 hover:bg-cyan-500 disabled:bg-gray-700 disabled:cursor-not-allowed text-white px-6 py-3 rounded-lg font-semibold transition-all flex items-center justify-center space-x-2 cursor-pointer"
+                    >
+                      {checkingRisk ? (
+                        <>
+                          <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
+                          <span>Checking Security...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Shield className="w-5 h-5" />
+                          <span>Check Address & Continue</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                )}
+
+                {/* Step 2: Risk Assessment Results */}
+                {sendStep === 2 && riskAssessment && (
+                  <div className="space-y-6">
+                    {/* Blocklist Warning Banner */}
+                    {riskAssessment.isBlocked && (
+                      <div className="bg-red-900/40 border-2 border-red-700/70 rounded-xl p-5">
+                        <div className="flex items-start space-x-3">
+                          <UserX className="w-7 h-7 text-red-400 flex-shrink-0 mt-0.5" />
+                          <div className="flex-1">
+                            <p className="text-red-400 font-bold text-lg mb-2">🚫 Address Blocked</p>
+                            <p className="text-red-300 text-sm mb-3">
+                              This address is in your blocklist. You cannot send funds to this address.
+                            </p>
+                            {riskAssessment.blocklistEntry && riskAssessment.blocklistEntry.reason && (
+                              <div className="bg-red-950/50 rounded-lg p-3 border border-red-800">
+                                <p className="text-red-300 text-xs font-semibold mb-1">Reason for blocking:</p>
+                                <p className="text-red-200 text-xs">{riskAssessment.blocklistEntry.reason}</p>
+                              </div>
+                            )}
+                            <p className="text-red-300/80 text-xs mt-3">
+                              To send to this address, you must first remove it from your blocklist in the <strong>Manage Blocklist</strong> tab.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Warning Banner if verification failed */}
+                    {!riskAssessment.isBlocked && riskAssessment.chainAbuseResult && !riskAssessment.chainAbuseResult.checked && (
+                      <div className="bg-yellow-900/30 border-2 border-yellow-700/50 rounded-xl p-4">
+                        <div className="flex items-start space-x-3">
+                          <AlertTriangle className="w-6 h-6 text-yellow-400 flex-shrink-0 mt-0.5" />
+                          <div>
+                            <p className="text-yellow-400 font-bold text-sm mb-1">⚠️ Verification Service Unavailable</p>
+                            <p className="text-yellow-300/90 text-xs">
+                              {riskAssessment.chainAbuseResult.warning || 'Unable to verify this address against fraud databases due to API restrictions. Please verify the recipient address manually before proceeding.'}
+                            </p>
+                            <p className="text-yellow-300/70 text-xs mt-2">
+                              <strong>Recommendation:</strong> Only send to addresses you trust and have verified independently.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Risk Score Display */}
+                    <div className={`rounded-xl p-6 border-2 ${
+                      riskAssessment.safe 
+                        ? 'bg-green-900/20 border-green-700/50' 
+                        : 'bg-red-900/30 border-red-700/50'
+                    }`}>
+                      <div className="flex items-center space-x-4 mb-4">
+                        {riskAssessment.safe ? (
+                          <div className="w-16 h-16 rounded-full bg-green-600/30 flex items-center justify-center border-2 border-green-500">
+                            <CheckCircle className="w-8 h-8 text-green-400" />
+                          </div>
+                        ) : (
+                          <div className="w-16 h-16 rounded-full bg-red-600/30 flex items-center justify-center border-2 border-red-500">
+                            <XCircle className="w-8 h-8 text-red-400" />
+                          </div>
+                        )}
+                        <div className="flex-1">
+                          <h4 className={`text-2xl font-bold ${
+                            riskAssessment.safe ? 'text-green-400' : 'text-red-400'
+                          }`}>
+                            {riskAssessment.safe ? 'Wallet Looks Safe' : 'High Risk Detected'}
+                          </h4>
+                          <p className={`text-sm mt-1 ${
+                            riskAssessment.safe ? 'text-green-300/80' : 'text-red-300/80'
+                          }`}>
+                            Risk Score: {riskAssessment.riskScore}/100 ({riskAssessment.riskLevel})
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* Risk Factors */}
+                      {riskAssessment.riskFactors && riskAssessment.riskFactors.length > 0 && (
+                        <div className="space-y-2 mt-4">
+                          <p className="text-sm font-semibold text-gray-300">Risk Factors:</p>
+                          {riskAssessment.riskFactors.map((factor, index) => (
+                            <div key={index} className="bg-gray-800/50 rounded-lg p-3 border border-gray-700">
+                              <div className="flex items-start space-x-2">
+                                <AlertTriangle className={`w-4 h-4 flex-shrink-0 mt-0.5 ${
+                                  factor.severity === 'critical' ? 'text-red-400' :
+                                  factor.severity === 'high' ? 'text-orange-400' :
+                                  factor.severity === 'medium' ? 'text-yellow-400' : 'text-gray-400'
+                                }`} />
+                                <div>
+                                  <p className="text-sm font-semibold text-white">{factor.reason}</p>
+                                  {factor.details && (
+                                    <p className="text-xs text-gray-400 mt-1">
+                                      {typeof factor.details === 'string' ? factor.details : JSON.stringify(factor.details)}
+                                    </p>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* ChainAbuse Reports */}
+                      {riskAssessment.chainAbuseResult && riskAssessment.chainAbuseResult.reports && riskAssessment.chainAbuseResult.reports.length > 0 && (
+                        <div className="mt-4 bg-red-950/50 rounded-lg p-4 border border-red-800">
+                          <p className="text-red-400 font-bold text-sm mb-2">⚠️ Fraud Reports Found:</p>
+                          {riskAssessment.chainAbuseResult.reports.slice(0, 3).map((report, index) => (
+                            <div key={index} className="text-xs text-red-300 mb-1">
+                              • Category: {report.category || 'Unknown'} | Reporter: {report.reporter || 'Anonymous'}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Helius Analysis */}
+                      {riskAssessment.heliusResult && (
+                        <div className="mt-4 bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                          <p className="text-gray-300 font-semibold text-sm mb-2">Blockchain Analysis:</p>
+                          <div className="grid grid-cols-2 gap-2 text-xs">
+                            <div className="text-gray-400">Balance: <span className="text-white">{riskAssessment.heliusResult.balance?.toFixed(4) || 0} SOL</span></div>
+                            <div className="text-gray-400">Transactions: <span className="text-white">{riskAssessment.heliusResult.transactionCount || 0}</span></div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Action Buttons */}
+                    <div className="flex space-x-4">
+                      <button
+                        onClick={() => setSendStep(1)}
+                        className="flex-1 bg-gray-700 hover:bg-gray-600 text-white px-6 py-3 rounded-lg font-semibold transition-all cursor-pointer"
+                      >
+                        Back
+                      </button>
+                      {riskAssessment.isBlocked ? (
+                        <button
+                          disabled
+                          className="flex-1 bg-red-900/50 text-red-300 px-6 py-3 rounded-lg font-semibold cursor-not-allowed flex items-center justify-center gap-2"
+                        >
+                          <UserX className="w-5 h-5" />
+                          Address Blocked
+                        </button>
+                      ) : riskAssessment.safe ? (
+                        <button
+                          onClick={handleProceedToTransaction}
+                          className="flex-1 bg-green-600 hover:bg-green-500 text-white px-6 py-3 rounded-lg font-semibold transition-all cursor-pointer"
+                        >
+                          Proceed to Send
+                        </button>
+                      ) : (
+                        <button
+                          disabled
+                          className="flex-1 bg-red-900/50 text-red-300 px-6 py-3 rounded-lg font-semibold cursor-not-allowed"
+                        >
+                          Transaction Blocked
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Step 3: Transaction Setup */}
+                {sendStep === 3 && (
+                  <div className="space-y-6">
+                    {/* Recipient Summary */}
+                    <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                      <p className="text-xs text-gray-400 mb-1">Sending to:</p>
+                      <p className="text-sm text-white font-mono truncate">{recipientAddress}</p>
+                      <div className="flex items-center space-x-2 mt-2">
+                        <CheckCircle className="w-4 h-4 text-green-400" />
+                        <p className="text-xs text-green-400">Verified Safe</p>
+                      </div>
+                    </div>
+
+                    {/* Select Wallet */}
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-300 mb-2">
+                        From Wallet
+                      </label>
+                      <select
+                        value={selectedSendWallet ? selectedSendWallet.publicKey : ''}
+                        onChange={(e) => {
+                          const wallet = connectedWallets.find(w => w.publicKey === e.target.value);
+                          setSelectedSendWallet(wallet);
+                        }}
+                        className="w-full bg-gray-800/70 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-cyan-500 cursor-pointer"
+                      >
+                        <option value="">Select a wallet...</option>
+                        {connectedWallets.filter(w => w.type === 'solana').map((wallet, index) => {
+                          const balance = walletBalances[wallet.publicKey] || 0;
+                          return (
+                            <option key={index} value={wallet.publicKey}>
+                              {wallet.name} - {balance.toFixed(5)} SOL
+                            </option>
+                          );
+                        })}
+                      </select>
+                    </div>
+
+                    {/* Amount */}
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-300 mb-2">
+                        Amount (SOL)
+                      </label>
+                      <div className="relative">
+                        <input
+                          type="number"
+                          step="0.000001"
+                          min="0"
+                          value={sendAmount}
+                          onChange={(e) => setSendAmount(e.target.value)}
+                          placeholder="0.00"
+                          className="w-full bg-gray-800/70 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:border-transparent"
+                        />
+                        {selectedSendWallet && (
+                          <button
+                            onClick={() => {
+                              const balance = walletBalances[selectedSendWallet.publicKey] || 0;
+                              setSendAmount((balance * 0.99).toFixed(6)); // Leave some for fees
+                            }}
+                            className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-cyan-400 hover:text-cyan-300 font-semibold cursor-pointer"
+                          >
+                            MAX
+                          </button>
+                        )}
+                      </div>
+                      {selectedSendWallet && (
+                        <p className="text-xs text-gray-400 mt-1">
+                          Available: {(walletBalances[selectedSendWallet.publicKey] || 0).toFixed(5)} SOL
+                        </p>
+                      )}
+                    </div>
+
+                    {/* Token Selection (Currently only SOL) */}
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-300 mb-2">
+                        Token
+                      </label>
+                      <div className="bg-gray-800/70 border border-gray-700 rounded-lg px-4 py-3 text-white">
+                        SOL (Solana)
+                      </div>
+                      <p className="text-xs text-gray-400 mt-1">SPL token support coming soon</p>
+                    </div>
+
+                    {transactionError && (
+                      <div className="bg-red-900/30 border border-red-700/50 rounded-lg p-4 flex items-start space-x-3">
+                        <AlertTriangle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
+                        <p className="text-red-300 text-sm">{transactionError}</p>
+                      </div>
+                    )}
+
+                    {/* Action Buttons */}
+                    <div className="flex space-x-4">
+                      <button
+                        onClick={() => setSendStep(2)}
+                        className="flex-1 bg-gray-700 hover:bg-gray-600 text-white px-6 py-3 rounded-lg font-semibold transition-all cursor-pointer"
+                      >
+                        Back
+                      </button>
+                      <button
+                        onClick={handleSendTransaction}
+                        disabled={sendingTransaction || !selectedSendWallet || !sendAmount || parseFloat(sendAmount) <= 0}
+                        className="flex-1 bg-cyan-600 hover:bg-cyan-500 disabled:bg-gray-700 disabled:cursor-not-allowed text-white px-6 py-3 rounded-lg font-semibold transition-all flex items-center justify-center space-x-2 cursor-pointer"
+                      >
+                        {sendingTransaction ? (
+                          <>
+                            <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
+                            <span>Sending...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Send className="w-5 h-5" />
+                            <span>Send Transaction</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Step 4: Success */}
+                {sendStep === 4 && transactionSignature && (
+                  <div className="space-y-6">
+                    {/* Success Animation */}
+                    <div className="flex flex-col items-center justify-center py-8">
+                      <div className="w-24 h-24 rounded-full bg-green-600/30 flex items-center justify-center border-4 border-green-500 mb-6 animate-bounce">
+                        <CheckCircle className="w-12 h-12 text-green-400" />
+                      </div>
+                      <h4 className="text-3xl font-bold text-green-400 mb-2">Transaction Sent!</h4>
+                      <p className="text-gray-400 text-center">Your transaction has been successfully submitted to the network</p>
+                    </div>
+
+                    {/* Transaction Details */}
+                    <div className="bg-gray-800/50 rounded-lg p-6 border border-gray-700 space-y-4">
+                      <div>
+                        <p className="text-xs text-gray-400 mb-1">Transaction Signature</p>
+                        <div className="flex items-center space-x-2">
+                          <p className="text-sm text-white font-mono truncate flex-1">{transactionSignature}</p>
+                          <button
+                            onClick={async () => {
+                              try {
+                                await navigator.clipboard.writeText(transactionSignature);
+                              } catch (err) {
+                                console.error('Copy failed');
+                              }
+                            }}
+                            className="p-2 hover:bg-gray-700 rounded transition-colors cursor-pointer"
+                          >
+                            <Copy className="w-4 h-4 text-gray-400" />
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-4 pt-4 border-t border-gray-700">
+                        <div>
+                          <p className="text-xs text-gray-400 mb-1">Amount</p>
+                          <p className="text-sm text-white font-semibold">{sendAmount} SOL</p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-gray-400 mb-1">To</p>
+                          <p className="text-sm text-white font-mono truncate">{recipientAddress.slice(0, 8)}...{recipientAddress.slice(-8)}</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Explorer Link */}
+                    <a
+                      href={`https://explorer.solana.com/tx/${transactionSignature}${network === 'devnet' ? '?cluster=devnet' : ''}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="w-full bg-purple-600 hover:bg-purple-500 text-white px-6 py-3 rounded-lg font-semibold transition-all flex items-center justify-center space-x-2 cursor-pointer"
+                    >
+                      <ExternalLink className="w-5 h-5" />
+                      <span>View on Solana Explorer</span>
+                    </a>
+
+                    {/* Close Button */}
+                    <button
+                      onClick={() => {
+                        setShowSendModal(false);
+                        resetSendModal();
+                      }}
+                      className="w-full bg-gray-700 hover:bg-gray-600 text-white px-6 py-3 rounded-lg font-semibold transition-all cursor-pointer"
+                    >
+                      Close
+                    </button>
                   </div>
                 )}
               </div>

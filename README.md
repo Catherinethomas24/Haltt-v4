@@ -1,6 +1,91 @@
-# Getting Started with Create React App
+# HALTT - Solana Wallet Security Platform
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+A comprehensive Solana wallet management platform with built-in fraud detection and security features.
+
+## 🚀 Quick Start
+
+### Prerequisites
+- Node.js v14 or higher
+- npm or yarn
+
+### Installation
+
+1. **Install frontend dependencies:**
+```bash
+npm install
+```
+
+2. **Install proxy server dependencies:**
+```bash
+cd server
+npm install
+cd ..
+```
+
+### Running the Application
+
+**IMPORTANT:** You need to run BOTH the frontend and proxy server for fraud detection to work.
+
+#### Terminal 1 - Start Proxy Server (Required for fraud detection):
+```bash
+cd server
+npm start
+```
+Server will run on `http://localhost:3001`
+
+#### Terminal 2 - Start React App:
+```bash
+npm start
+```
+App will open at `http://localhost:3000`
+
+## 🛡️ Features
+
+- **Multi-Wallet Support**: Connect Phantom, Solflare, Backpack wallets
+- **Real-time Balance Tracking**: Monitor SOL balances across all wallets
+- **Transaction History**: View detailed transaction history
+- **Fraud Detection**: Automatic address verification using ChainAbuse API
+- **Blockchain Analysis**: Real-time analysis using Helius API
+- **Secure Sending**: Multi-step verification before sending transactions
+- **Audit Logs**: Track all wallet connections and activities
+- **Receipt Management**: Store and manage transaction receipts
+- **QR Code Generation**: Generate QR codes for receiving payments
+
+## 🔒 Security Features
+
+### Send Transaction Workflow:
+1. **Address Entry**: User enters recipient address
+2. **Fraud Check**: System checks address against ChainAbuse database
+3. **Risk Assessment**: Displays risk score and fraud reports
+4. **Transaction Blocking**: Automatically blocks transactions to flagged addresses
+5. **Manual Verification**: Warns users if verification service is unavailable
+
+## 📁 Project Structure
+
+```
+haltt-project/
+├── src/
+│   ├── components/        # React components
+│   │   ├── Dashboard.js   # Main dashboard
+│   │   └── tabs/          # Tab components
+│   ├── services/          # API services
+│   │   ├── fraudDetectionService.js  # ChainAbuse & Helius integration
+│   │   ├── walletService.js          # Wallet management
+│   │   └── auditLogService.js        # Audit logging
+│   └── firebase.js        # Firebase configuration
+├── server/                # Proxy server (REQUIRED)
+│   ├── proxy.js          # Express proxy server
+│   ├── package.json      # Server dependencies
+│   └── README.md         # Server documentation
+└── public/               # Static assets
+```
+
+## 🔧 Configuration
+
+### API Keys (Already Configured)
+- **Helius API**: For blockchain data
+- **ChainAbuse API**: For fraud detection
+- **Firebase**: For user authentication and data storage
 
 ## Available Scripts
 
