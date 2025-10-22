@@ -570,10 +570,17 @@ const Dashboard = () => {
     };
 
     const handleCheckRecipient = async (addressToCheck = null) => {
+      console.log('🔘 Check button clicked!');
+      console.log('📍 addressToCheck:', addressToCheck);
+      console.log('📍 recipientAddress state:', recipientAddress);
+      
       // Use provided address or fall back to state
       const addressToValidate = addressToCheck || recipientAddress;
       
+      console.log('✅ Final address to validate:', addressToValidate);
+      
       if (!addressToValidate || addressToValidate.trim().length === 0) {
+        console.error('❌ No address provided!');
         setTransactionError('Please enter a valid Solana address');
         return;
       }
