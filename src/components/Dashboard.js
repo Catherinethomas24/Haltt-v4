@@ -74,9 +74,8 @@ const Dashboard = () => {
         'mainnet-beta': [
             'https://mainnet.helius-rpc.com/?api-key=277fd0d2-3b36-46a0-8ecc-24d7cac3a071', // Helius (PREMIUM - use first)
             'https://solitary-distinguished-uranium.solana-mainnet.quiknode.pro/QN_b089837dc0d445729831b789cc04a22c/', // QuickNode
-            'https://api.mainnet-beta.solana.com', // Public Solana RPC (fallback)
-            'https://solana-api.projectserum.com', // Serum RPC (fallback)
-            'https://rpc.ankr.com/solana' // Ankr public RPC (fallback)
+            'https://rpc.ankr.com/solana', // Ankr public RPC
+            'https://solana.public-rpc.com' // Alternative public RPC
         ],
         'devnet': [
             'https://devnet.helius-rpc.com/?api-key=277fd0d2-3b36-46a0-8ecc-24d7cac3a071', // Helius Devnet
@@ -194,8 +193,8 @@ const Dashboard = () => {
       if (window.solana && network === 'mainnet-beta') {
         try {
           console.log('Creating connection using Phantom provider...');
-          // Create a connection using Phantom's internal RPC
-          const connection = new Connection('https://api.mainnet-beta.solana.com', {
+          // Create a connection using our RPC endpoints
+          const connection = new Connection(rpcEndpoints[network][0], {
             commitment: 'confirmed',
             fetch: window.solana._rpcRequest ? window.solana._rpcRequest.bind(window.solana) : undefined
           });
@@ -247,7 +246,7 @@ const Dashboard = () => {
         if (window.solana && network === 'mainnet-beta') {
             try {
                 console.log('🔮 Trying Phantom provider for transactions...');
-                connection = new Connection('https://api.mainnet-beta.solana.com', {
+                connection = new Connection(rpcEndpoints[network][0], {
                     commitment: 'finalized',
                     fetch: window.solana._rpcRequest ? window.solana._rpcRequest.bind(window.solana) : undefined
                 });
