@@ -5,13 +5,13 @@ import { getFirestore } from 'firebase/firestore';
 
 // --- 1. FIREBASE CONFIGURATION (Using the user's provided config) ---
 const firebaseConfig = {
-  apiKey: "AIzaSyBlXWghjhmmCcyEb2MO8p-gWaQOsg30jss",
-  authDomain: "haltt-protocol.firebaseapp.com",
-  projectId: "haltt-protocol",
-  storageBucket: "haltt-protocol.firebasestorage.app",
-  messagingSenderId: "36896481785",
-  appId: "1:36896481785:web:50c40b29463390a43add28",
-  measurementId: "G-QNYB9ZHYQP"
+  apiKey: "AIzaSyBACruJm6s1BTQqtjN_KNbJqI45ROi63zE",
+  authDomain: "haltt-xyz.firebaseapp.com",
+  projectId: "haltt-xyz",
+  storageBucket: "haltt-xyz.firebasestorage.app",
+  messagingSenderId: "621833877945",
+  appId: "1:621833877945:web:b7c3f35f0e5951cf165e68",
+  measurementId: "G-EYGM5S0T89"
 };
 
 // Initialize Firebase App
