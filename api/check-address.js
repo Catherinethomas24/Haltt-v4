@@ -1,4 +1,3 @@
-// Vercel Serverless Function for ChainAbuse API
 const fetch = require('node-fetch');
 
 const CHAINABUSE_API_KEY = process.env.CHAINABUSE_API_KEY;
