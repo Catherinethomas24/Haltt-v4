@@ -15,10 +15,13 @@ export const checkChainAbuse = async (address) => {
     // Method 1: Use our backend proxy server (RECOMMENDED - bypasses CORS)
     try {
       console.log('🔄 Attempting ChainAbuse check via backend proxy...');
-      console.log('📍 Proxy URL: http://localhost:3001/api/check-address');
       console.log('📦 Request payload:', { address, chain: 'solana' });
       
-      const proxyUrl = 'http://localhost:3001/api/check-address';
+      const isLocal = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+      const proxyUrl = isLocal
+        ? 'http://localhost:3001/api/check-address'
+        : '/api/check-address';
+      console.log('🌐 Proxy URL:', proxyUrl);
       
       const response = await fetch(proxyUrl, {
         method: 'POST',
