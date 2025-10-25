@@ -254,7 +254,7 @@ const ManualFraudReporting = () => {
           <div className="flex justify-center">
             <Turnstile
               ref={turnstileRef}
-              sitekey="0x4AAAAAAB7i-CXLmMjIUopP"
+              sitekey="0x4AAAAAAB8oO_DaSu7xnrmH"
               onVerify={(token) => setTurnstileToken(token)}
               onError={() => setTurnstileToken('')}
               onExpire={() => setTurnstileToken('')}
